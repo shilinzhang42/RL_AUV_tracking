@@ -72,12 +72,21 @@ class AUVTrackingDataset(BaseImageDataset):
         
         self.train_mask = train_mask
 
-    def _load_auv_data(self, data_path: str) -> ReplayBuffer:
-        """Load AUV data (zarr format)"""
-        if not data_path.endswith('.zarr'):
-            raise ValueError(f"Only zarr format data files are supported, current file: {data_path}")
+    # def _load_auv_data(self, data_path: str) -> ReplayBuffer:
+    #     """Load AUV data (zarr format)"""
+    #     if not data_path.endswith('.zarr'):
+    #         raise ValueError(f"Only zarr format data files are supported, current file: {data_path}")
         
-        return ReplayBuffer.copy_from_path(data_path, keys=self.data_keys)
+    #     return ReplayBuffer.copy_from_path(data_path, keys=self.data_keys)
+
+    def _load_auv_data(self, data_path: str) -> ReplayBuffer:
+        """优化：使用内存映射方式加载数据，不占用物理内存"""
+        if not data_path.endswith('.zarr'):
+            raise ValueError(f"仅支持 zarr 格式: {data_path}")
+        
+        # 核心修改：使用 create_from_path，mode='r' 表示只读
+        # 这不会把数据搬进内存，只会建立一个磁盘索引
+        return ReplayBuffer.create_from_path(data_path, mode='r')
 
     def get_validation_dataset(self):
         """Create validation set"""
@@ -92,15 +101,34 @@ class AUVTrackingDataset(BaseImageDataset):
         val_set.train_mask = ~self.train_mask
         return val_set
 
+    # def get_normalizer(self, mode='limits', **kwargs):
+    #     data = {
+    #         'action': self.replay_buffer['action'],
+    #         'state': self.replay_buffer['state']
+    #     } 
+    #     normalizer = LinearNormalizer()
+    #     normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        
+    #     # Image normalizer
+    #     normalizer['camera_image'] = get_image_range_normalizer()
+        
+    #     return normalizer
+    
     def get_normalizer(self, mode='limits', **kwargs):
-        data = {
-            'action': self.replay_buffer['action'],
-            'state': self.replay_buffer['state']
-        } 
+        # 优化点：不再直接读取 self.replay_buffer['action']
+        # 而是只取前 1000 个或者一部分样本来计算归一化参数，或者确保 zarr 只读取 metadata
         normalizer = LinearNormalizer()
+        
+        # 建议：如果数据集太大，手动构造一个小规模样本池来拟合
+        # 或者使用 zarr 的索引切片功能，只读取部分数据
+        data = {
+            'action': self.replay_buffer['action'][:10000], # 只读前1万帧
+            'state': self.replay_buffer['state'][:10000]
+        } 
+        
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
         
-        # Image normalizer
+        # 图像归一化通常是固定的 [0, 1] 或 [-1, 1]，不需要 fit 数据
         normalizer['camera_image'] = get_image_range_normalizer()
         
         return normalizer

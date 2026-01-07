@@ -3,13 +3,20 @@
 
 training:
   device: "cuda"
+<<<<<<< HEAD
   seed: 42
   nb_envs: 1
   timesteps: 5000000
   save_freq: 500000
+=======
+  seed: 22
+  nb_envs: 6
+  timesteps: 3000000
+  save_freq: 250000
+>>>>>>> 33ebabf6a63cd1dbe603c9c22899a061f468f79b
   log_dir: "log"
   log_freq: 1000
-  resume_path: "log/AUVTracking3D_v0/LQR/SAC/08-21_19/best_model.zip"
+  resume_path: "log/AUVTracking3D_v1/PID/best_model.zip"
 
 policy:
   net_arch:
@@ -23,13 +30,14 @@ policy:
       resnet_output_dim: 256
 
 policy_hparams:
-  policy: "SAC"
+  policy: "CustomSACPolicy"
+  policy_path: "auv_track_launcher.policys.custom_sac_policy.CustomSACPolicy"
   lr: 0.0001
-  buffer_size: 10000
+  buffer_size: 100000
   batch_size: 256
   gamma: 0.99
   tau: 0.005
-  noise_std: 0.05
+  noise_std: 0.12
   start_timesteps: 1000
   
   # SAC specific

@@ -21,7 +21,7 @@ from auv_control.planning.local_planner import TrajectoryPlanner, TrajectoryBuff
 
 import auv_env.util as util
 from auv_env.envs.obstacle import Obstacle
-from auv_env.envs.agent import AgentAuv, AgentAuvTarget, AgentAuvManual
+from auv_env.envs.agent import AgentAuv, AgentAuvTarget, AgentAuvManual, AgentAuvTarget2DRangeFinder
 
 
 class TargetTrackingBase(gym.Env):
@@ -37,7 +37,7 @@ class TargetTrackingBase(gym.Env):
         # init some params
         self.num_targets = config['env']['num_targets']
         # init the scenario
-        self.world = world_class(map=map, show=show_viewport, config=self.config)
+        self.world = world_class(map=map, show=show_viewport, config=self.config)#, verbose=True)
         # # init the action space
         self.action_space = self.world.action_space
         self.observation_space = self.world.observation_space
@@ -120,6 +120,14 @@ class WorldBase:
         self.sensors = {}
         self.set_limits()
 
+        # Initialize ocean current field
+        self.current_field_func = None
+        self.current_visualization_enabled = False
+        self.current_visualization_config = None
+        self.current_visualization_drawn = False
+        self.current_tick_count = 0
+        self._init_ocean_current()
+
     def step(self, action):
         if self.controller == 'LQR':
             # Generate target knot from RL action
@@ -198,7 +206,33 @@ class WorldBase:
                     ])
             
             # Update agent
-            self.u = self.agent.update(self.action, self.fix_depth, self.sensors['auv0'])
+            self.u = self.agent.update(self.action, self.fix_depth_scalar, self.sensors['auv0'])
+
+            # Apply ocean currents to auv0 (for 2D, use fixed depth for z-coordinate)
+            if self.current_field_func is not None:
+                try:
+                    current_time = self.sensors.get('t', 0.0)
+                    agent_location = np.array([
+                        self.agent.est_state.vec[0],
+                        self.agent.est_state.vec[1],
+                        self.fix_depth_scalar
+                    ])
+                    current_velocity = self.current_field_func(agent_location, current_time)
+
+                    # Validate and clip extreme values
+                    if isinstance(current_velocity, np.ndarray) and current_velocity.shape == (3,):
+                        if np.all(np.isfinite(current_velocity)):
+                            max_current_speed = 5.0
+                            current_speed = np.linalg.norm(current_velocity)
+                            if current_speed > max_current_speed:
+                                current_velocity = current_velocity * (max_current_speed / current_speed)
+
+                            # Apply via HoloOcean API
+                            self.ocean.set_ocean_currents('auv0', current_velocity.tolist())
+                except Exception as e:
+                    # Silently handle errors to not disrupt training
+                    pass
+
             self.ocean.act("auv0", self.u)
             sensors = self.ocean.tick()
             # update
@@ -207,6 +241,14 @@ class WorldBase:
                 target = 'target'+str(i)
                 self.sensors[target].update(sensors[target])
             self.update_every_tick(sensors)
+
+            # Increment tick counter and check for visualization
+            self.current_tick_count += 1
+            if (self.current_visualization_enabled and not self.current_visualization_drawn):
+                draw_at_tick = self.current_visualization_config.get('draw_at_tick', 100)
+                if draw_at_tick > 0 and self.current_tick_count == draw_at_tick:
+                    self._draw_current_field_visualization(current_time=sensors.get('t', 0.0))
+                    self.current_visualization_drawn = True
 
         # The targets are observed by the agent (z_t+1) and the beliefs are updated.
         observed = self.observe_and_update_belief()
@@ -243,6 +285,14 @@ class WorldBase:
                     sensor=target_init_state,
                     scene=self.ocean, config=self.config)
                 for _ in range(self.num_targets)]
+        elif self.config['target']['controller'] == 'Auto':
+            # 2D rangefinder-based random target motion
+            self.targets = [AgentAuvTarget2DRangeFinder(dim=3, sampling_period=sampling_period,
+                        sensor=target_init_state, rank=i,
+                        fixed_depth=self.fix_depth_scalar, size=self.size,
+                        bottom_corner=self.bottom_corner, start_time=time, scene=self.ocean,
+                        scenario=self.map, config=self.config)
+                for i in range(self.num_targets)]
         else:
             self.targets = [AgentAuvTarget(dim=3, sampling_period=sampling_period, sensor=target_init_state, rank=i,
                         obstacles=self.obstacles, fixed_depth=self.fix_depth, size=self.size,
@@ -269,6 +319,10 @@ class WorldBase:
 
     def reset(self, seed=None, **kwargs):
         self.ocean.reset()
+        # Reset ocean current visualization flags
+        self.current_tick_count = 0
+        self.current_visualization_drawn = False
+
         if self.config['draw_traj']:
             self.ocean.draw_box(self.center.tolist(), (self.size / 2).tolist(), color=[0, 0, 255], thickness=30,
                                 lifetime=0)  # draw the area
@@ -296,6 +350,29 @@ class WorldBase:
         self.target_init_yaw = None
         self.agent_init_pos, self.agent_init_yaw, self.target_init_pos, self.target_init_yaw, self.belief_init_pos \
             = self.get_init_pose_random()
+
+        # Ensure depth is scalar and positions are 3D (Holoocean teleport expects length 3)
+        if np.isscalar(self.fix_depth):
+            fix_z = float(self.fix_depth)
+        elif isinstance(self.fix_depth, (list, tuple, np.ndarray)) and len(self.fix_depth) == 2:
+            fix_z = float(np.mean(self.fix_depth))
+        else:
+            fix_z = -5.0  # fallback
+
+        self.fix_depth_scalar = fix_z
+
+        def _to_xyz(pos):
+            pos = np.array(pos, dtype=float)
+            if pos.shape[0] >= 3:
+                return pos[:3]
+            elif pos.shape[0] == 2:
+                return np.array([pos[0], pos[1], fix_z], dtype=float)
+            else:
+                return np.array([0.0, 0.0, fix_z], dtype=float)
+
+        self.agent_init_pos = _to_xyz(self.agent_init_pos)
+        self.target_init_pos = _to_xyz(self.target_init_pos)
+        self.belief_init_pos = _to_xyz(self.belief_init_pos)
 
         if self.config['eval_fixed']:
             self.agent_init_pos = np.array([35, 35, -15.])
@@ -356,6 +433,14 @@ class WorldBase:
         # Compute the RL state.
         state = self.state_func(observed, action=np.zeros(self.action_dim))
         info = {'reset_info': 'yes'}
+
+        # Draw ocean current visualization at reset if draw_at_tick == 0
+        if self.current_visualization_enabled:
+            draw_at_tick = self.current_visualization_config.get('draw_at_tick', 100)
+            if draw_at_tick == 0:
+                self._draw_current_field_visualization(current_time=self.sensors.get('t', 0.0))
+                self.current_visualization_drawn = True
+
         return state, info
 
     @property
@@ -522,6 +607,71 @@ class WorldBase:
                     self.has_discovered[i] = 1
             self.record_cov_posterior.append(self.belief_targets[i].cov)
         return observed
+
+    def _init_ocean_current(self):
+        """Initialize ocean current field from configuration."""
+        if 'ocean_current' not in self.config:
+            self.current_field_func = None
+            return
+
+        current_config = self.config['ocean_current']
+        if not current_config.get('enabled', False):
+            self.current_field_func = None
+            return
+
+        try:
+            from auv_env.current_fields import create_current_field
+            self.current_field_func = create_current_field(current_config)
+            if self.current_field_func is not None:
+                field_type = current_config.get('type', 'unknown')
+                print(f"Ocean current field enabled: {field_type}")
+
+                # Check if visualization is enabled
+                viz_config = current_config.get('visualization', {})
+                if viz_config.get('enabled', False):
+                    self.current_visualization_enabled = True
+                    self.current_visualization_config = viz_config
+                    print(f"Ocean current visualization enabled")
+        except Exception as e:
+            print(f"Warning: Failed to initialize ocean current: {e}")
+            self.current_field_func = None
+
+    def _draw_current_field_visualization(self, current_time=0.0):
+        """
+        Draw ocean current field visualization using HoloOcean's draw_debug_vector_field.
+        This creates a 3D matrix of vectors showing the current flow.
+        """
+        if not self.current_visualization_enabled or self.current_field_func is None:
+            return
+
+        viz_config = self.current_visualization_config
+        location = viz_config.get('location', [0, 0, -10])
+        dimensions = viz_config.get('dimensions', [40, 40, 20])
+        spacing = viz_config.get('spacing', 3)
+        arrow_thickness = viz_config.get('arrow_thickness', 5)
+        arrow_size = viz_config.get('arrow_size', 0.25)
+        lifetime = viz_config.get('lifetime', 0)
+
+        # Wrapper function to convert current_field_func signature to HoloOcean API
+        def current_field_wrapper(loc):
+            """Wrapper that converts location list to numpy array and calls field function"""
+            return self.current_field_func(np.array(loc), current_time)
+
+        try:
+            # Call HoloOcean's draw_debug_vector_field
+            # Note: Function must be first positional argument (not keyword argument)
+            self.ocean.draw_debug_vector_field(
+                current_field_wrapper,  # Function as first positional argument
+                location=location,
+                vector_field_dimensions=dimensions,
+                spacing=spacing,
+                arrow_thickness=arrow_thickness,
+                arrow_size=arrow_size,
+                lifetime=lifetime
+            )
+            print(f"Current field visualization drawn at location {location}")
+        except Exception as e:
+            print(f"Warning: Failed to draw current field visualization: {e}")
 
     @abstractmethod
     def set_limits(self):

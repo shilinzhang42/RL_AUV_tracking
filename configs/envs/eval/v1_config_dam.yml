@@ -3,7 +3,7 @@ name: AUVTracking_v1
 render: false
 draw_traj: false
 eval_fixed: false
-map: 'SimpleUnderwater-Bluerov2_RGB'
+map: 'Dam-Bluerov2_RGB'
 debug: false
 t_steps: 1000
 
@@ -20,9 +20,10 @@ obs:
   image: [64, 64]
 
 scenario:
-  size: [40, 40, 20]
-  bottom_corner: [-20, -20, -20]
-  fix_depth: -5
+  size: [100, 100, 30]
+  bottom_corner: [-250, -50, -70]
+  # Use scalar depth within map z-range [-70, -40] to avoid RRT failure
+  fix_depth: [5, 15]
 
 agent:
   controller: 'PID'
@@ -50,7 +51,7 @@ agent:
     p_occ: 0.8
     p_free: 0.25
     resolution: 0.1
-  sensor_r: 10.0
+  sensor_r: 4.0
   fov: 100
   sensor_r_sd: 0.2
   sensor_b_sd: 0.01
@@ -59,7 +60,7 @@ target:
   target_dim: 4
   random: false
   const_q: [0.5, [0.01, 0.02, 0.05, 0.1, 0.4, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]]
-  controller: 'LQR'
+  controller: 'Auto'
   controller_config:
     LQR:
       random_lp: false
@@ -93,6 +94,7 @@ reward_param:
   k_3: 0.0
   k_4: 0.0
   k_5: 0.0
+
 
 # Ocean current field configuration (disabled by default)
 ocean_current:

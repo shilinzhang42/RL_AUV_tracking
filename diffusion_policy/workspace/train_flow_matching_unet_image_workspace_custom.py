@@ -134,9 +134,23 @@ class TrainFlowMatchingUnetImageWorkspace(BaseWorkspace):
 
         # device transfer
         device = torch.device(cfg.training.device)
-        self.model.to(device)
-        if self.ema_model is not None:
-            self.ema_model.to(device)
+        # 照妖镜代码
+        print("===== 维度最终确认 =====")
+        test_img = torch.zeros(1, 2, 3, 64, 64) # B, T, C, H, W
+        # 模拟一遍 encoder
+        test_out = self.model.obs_encoder({"camera_image": test_img, "state": torch.zeros(1, 2, 128)})
+        print(f"输入 64x64，n_obs_steps=2 时，Encoder 输出维度: {test_out.shape}")
+
+        # 打印 ResNet 的具体结构，看看到底是谁在管 avgpool
+        rgb_key = 'camera_image'
+        if rgb_key in self.model.obs_encoder.key_model_map:
+            sub_model = self.model.obs_encoder.key_model_map[rgb_key]
+            print(f"该死，此时的 avgpool 类型竟然是: {type(sub_model.avgpool)}")
+            if isinstance(sub_model.avgpool, torch.nn.Identity):
+                print("!!! 警报：avgpool 被人在中途偷偷换成了 Identity !!!")
+                self.model.to(device)
+                if self.ema_model is not None:
+                    self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
 
         # save batch for sampling
@@ -230,23 +244,28 @@ class TrainFlowMatchingUnetImageWorkspace(BaseWorkspace):
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
-                        obs_dict = batch['obs']
+                        
+                        # 【核心修改】：对观测字典中的每一个张量进行切片，只取前 n_obs_steps 帧
+                        # 这样做是为了将维度从 131200 (16帧) 降回到 4224 (2帧)
+                        obs_dict = {
+                            k: v[:, :self.model.n_obs_steps] 
+                            for k, v in batch['obs'].items()
+                        }
+                        
                         gt_action = batch['action']
                         
+                        # 现在 obs_dict 是 (B, 2, C, H, W)，模型不会再报错了
                         result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
                         
-                        # [修复] 裁剪 gt_action 以匹配 pred_action 的形状
-                        # pred_action 的形状: (B, n_action_steps, action_dim)
-                        # gt_action 的形状: (B, horizon, action_dim)
-                        # 需要取 gt_action 的对应片段
+                        # 裁剪 gt_action 以匹配 pred_action 的形状 (n_action_steps)
+                        # 这里逻辑保持不变，确保对比的是“当前时刻”往后的动作
                         start = self.model.n_obs_steps - 1
                         end = start + self.model.n_action_steps
-                        gt_action_slice = gt_action[:, start:end, :]
+                        gt_action_slice = gt_action[:, start:end, :].to(pred_action.device)
                         
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action_slice)
                         step_log['train_action_mse_error'] = mse.item()
-
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()

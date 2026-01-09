@@ -61,14 +61,27 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
         dummy_obs = {}
         for key, attr in shape_meta['obs'].items():
             shape = tuple(attr['shape'])
-            tensor_shape = (1, self.horizon) + shape
+            # [修改点] 将 self.horizon 改为 self.n_obs_steps (通常是 2)
+            tensor_shape = (1, self.n_obs_steps) + shape 
             dummy_obs[key] = torch.zeros(tensor_shape, dtype=torch.float32)
         return dummy_obs
-
     # ================= 核心修改 1: 训练逻辑 =================
     def compute_loss(self, batch):
         # 1. 数据预处理
-        norm_obs = self.normalizer.normalize(batch['obs'])
+        obs = batch['obs']
+        # 【关键修改】：只取前 n_obs_steps 帧作为编码器的输入
+        # 假设 obs 是一个字典，我们需要对里面的每个 tensor 进行切片
+        compact_obs = dict()
+        for key, value in obs.items():
+            # value 形状通常是 (B, horizon, ...)
+            compact_obs[key] = value[:, :self.n_obs_steps]
+        
+        # 使用切片后的数据进行归一化和编码
+        norm_obs = self.normalizer.normalize(compact_obs)
+        global_cond = self.obs_encoder(norm_obs) 
+        # 现在 global_cond 的维度将是正确的 16512 (2帧)
+
+        # 后续逻辑保持不变...
         norm_action = self.normalizer['action'].normalize(batch['action'])
         batch_size = norm_action.shape[0]
 

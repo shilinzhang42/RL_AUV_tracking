@@ -9,9 +9,14 @@ def get_resnet(name, weights=None, **kwargs):
     # load r3m weights
     if (weights == "r3m") or (weights == "R3M"):
         return get_r3m(name=name, **kwargs)
-
+    print(f"DEBUG: get_resnet is called for {name}!") # 加上这一行
     func = getattr(torchvision.models, name)
     resnet = func(weights=weights, **kwargs)
+    # 1. 关键修改：固定输出为 4x4 的网格
+    # 这样图像特征维度永远是 512 * 4 * 4 = 8192
+    resnet.avgpool = torch.nn.AdaptiveAvgPool2d((2, 2)) 
+
+    # 2. 移除原有的全连接层
     resnet.fc = torch.nn.Identity()
     return resnet
 

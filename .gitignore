@@ -12,5 +12,5 @@ global*
 *data/
 
 *.mp4
-
+tmp*
 observations.json

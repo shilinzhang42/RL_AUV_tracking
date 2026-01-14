@@ -36,8 +36,8 @@ policy:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
       weights: null
-    resize_shape: [64, 64]
-    crop_shape: [60, 60]
+    resize_shape: [224, 224]
+    crop_shape: [200, 200]
     random_crop: True
     use_group_norm: True
     share_rgb_model: False
@@ -52,7 +52,7 @@ policy:
   
   # === 关键修改：针对 8GB 显存大幅缩小模型规模 ===
   # 原值 [512, 1024, 2048] 太大，改为 [256, 512, 1024]
-  down_dims: [128, 256, 512]
+  down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: True
@@ -67,18 +67,17 @@ ema:
 
 dataloader:
   batch_size: 128
-  num_workers: 4
+  num_workers: 1
   shuffle: True
-  pin_memory: False
+  pin_memory: True
   persistent_workers: False
 
 val_dataloader:
   batch_size: 128
-  num_workers: 4
+  num_workers: 1
   shuffle: False
-  pin_memory: False
+  pin_memory: True
   persistent_workers: False
-
 optimizer:
   _target_: torch.optim.AdamW
   lr: 3.0e-5

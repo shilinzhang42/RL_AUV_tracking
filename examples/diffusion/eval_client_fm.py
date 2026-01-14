@@ -3,23 +3,23 @@ import sys
 import pathlib
 import argparse
 import torch
-import torch.nn as nn  # 确保导入 nn
+import torch.nn as nn
 import numpy as np
 import zmq
-import json
+import collections
 from datetime import datetime
 from tqdm import tqdm
 import torchvision.transforms.functional as TF
 
-# 1. 先设置路径
+# 1. 设置路径
 ROOT = pathlib.Path(__file__).absolute().parents[2]
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
-# 2. 再导入项目模块
+# 2. 导入项目模块
 from diffusion_policy.workspace.train_flow_matching_unet_image_workspace_custom import \
     TrainFlowMatchingUnetImageWorkspace
-from diffusion_policy.model.vision.crop_randomizer import CropRandomizer # 移到这里
+from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 
 def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
     payload = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -32,44 +32,23 @@ def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
         policy = workspace.ema_model
     
     policy.to(device)
-    
-    # 1. 整体设为 eval
     policy.eval()
     
-    # 2. 强制 obs_encoder 为 train 模式 (保持 Dropout/BN 行为一致)
+    # 强制 obs_encoder 为 train 模式 (如果训练时用了 BatchNorm 或 Dropout)
     policy.obs_encoder.train()
     
-    # 3. [修复] 禁用 CropRandomizer
+    # 禁用 CropRandomizer
     if hasattr(policy.obs_encoder, 'key_transform_map'):
         for key, transform in policy.obs_encoder.key_transform_map.items():
             if isinstance(transform, CropRandomizer):
-                print(f"[Client] Disabling CropRandomizer for key: {key} (Direct)")
                 policy.obs_encoder.key_transform_map[key] = nn.Identity()
             elif isinstance(transform, nn.Sequential):
                 for i, module in enumerate(transform):
                     if isinstance(module, CropRandomizer):
-                        print(f"[Client] Disabling CropRandomizer for key: {key} (Inside Sequential at index {i})")
                         transform[i] = nn.Identity()
 
-    # 4. [关键修复] 强制移除 ResNet 的 Pooling 层
-    # 这一步是为了解决 640 vs 8320 的维度不匹配问题
-    if hasattr(policy.obs_encoder, 'key_model_map'):
-        for key, model in policy.obs_encoder.key_model_map.items():
-            print(f"[Client] Inspecting model for key: {key}")
-            
-            # 检查并替换 avgpool
-            if hasattr(model, 'avgpool'):
-                if not isinstance(model.avgpool, nn.Identity):
-                    print(f"[Client] Found active avgpool in {key}, replacing with Identity to restore spatial features.")
-                    model.avgpool = nn.Identity()
-            
-            # 检查并替换 fc
-            if hasattr(model, 'fc'):
-                if not isinstance(model.fc, nn.Identity):
-                    print(f"[Client] Found active fc in {key}, replacing with Identity.")
-                    model.fc = nn.Identity()
-
-    print("[Client] Policy loaded with forced train mode, disabled random crop, and removed pooling.")
+    # --- 已删除：手动替换 avgpool 和 fc 的逻辑 ---
+    print(f"[Client] Policy loaded. Using model pooling settings.")
     return policy, cfg
 
 class RemoteEnv:
@@ -82,7 +61,7 @@ class RemoteEnv:
     def reset(self):
         self.socket.send_json({"cmd": "RESET"})
         resp = self.socket.recv_json()
-        return self._parse_obs(resp["obs"]), {}
+        return self._parse_obs(resp["obs"])
 
     def step(self, action):
         self.socket.send_json({
@@ -91,48 +70,41 @@ class RemoteEnv:
         })
         resp = self.socket.recv_json()
         obs = self._parse_obs(resp["obs"])
-        return obs, resp["reward"], resp["done"], False, {} # Truncated=False
+        return obs, resp["reward"], resp["done"]
 
     def close(self):
         self.socket.send_json({"cmd": "CLOSE"})
         self.socket.recv_json()
 
     def _parse_obs(self, obs_dict):
-        # 还原 numpy 数组
         parsed = {}
-        # [修复] 同时处理 'camera_image' 和 'image'
-        if "camera_image" in obs_dict:
-            parsed["camera_image"] = np.array(obs_dict["camera_image"], dtype=np.uint8)
-        elif "image" in obs_dict:
-            parsed["image"] = np.array(obs_dict["image"], dtype=np.uint8)
-            
+        img_raw = obs_dict.get("camera_image") or obs_dict.get("image")
+        if img_raw is not None:
+            parsed["camera_image"] = np.array(img_raw, dtype=np.uint8)
         if "state" in obs_dict:
             parsed["state"] = np.array(obs_dict["state"], dtype=np.float32)
         return parsed
 
 def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
-    policy, cfg = load_flow_matching_policy(ckpt_path, device) # 获取 cfg
+    policy, cfg = load_flow_matching_policy(ckpt_path, device)
     
-    # 从配置中读取 crop_shape
-    # 假设 cfg 结构是 hydra 的 DictConfig
-    try:
-        crop_shape = cfg.policy.obs_encoder.crop_shape
-        print(f"[Client] Using crop_shape from config: {crop_shape}")
-    except:
-        crop_shape = [60, 60] # 默认值
-        print(f"[Client] Config not found, using default crop_shape: {crop_shape}")
-
+    # 【关键】从配置获取 n_obs_steps，通常是 2
+    n_obs_steps = cfg.n_obs_steps 
     env = RemoteEnv(port=port)
 
-    returns = []
-    lengths = []
+    # 【关键】使用队列维持 2 帧观察，解决 mat1/mat2 维度不匹配问题
+    obs_deque = collections.deque(maxlen=n_obs_steps)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    os.makedirs(f"data/debug_images/{timestamp}", exist_ok=True)
     save_path = f"data/debug_images/{timestamp}"
+    os.makedirs(save_path, exist_ok=True)
 
     for ep in tqdm(range(num_episodes), desc="Remote FM Eval"):
-        obs, _ = env.reset()
+        obs = env.reset()
+        # 初始化队列
+        for _ in range(n_obs_steps):
+            obs_deque.append(obs)
+            
         done = False
         ep_ret = 0.0
         ep_len = 0
@@ -140,70 +112,92 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
         while not done:
             obs_dict = {}
             
-            # [修复] 检查 'image' 键并重命名为 'camera_image'
-            # 环境返回的是 'image'，但模型需要 'camera_image'
-            img = None
-            if "camera_image" in obs:
-                img = obs["camera_image"]
-            elif "image" in obs:
-                img = obs["image"]
+            # 1. 图像处理 (B, T, C, H, W)
+            imgs = []
+            for o in obs_deque:
+                # 安全获取原始图像 (H, W, 3)
+                img = o.get("camera_image") if "camera_image" in o else o.get("image")
+                
+                # numpy (H, W, 3) -> torch (H, W, 3)
+                t = torch.from_numpy(img).float()
+                
+                # --- 核心自校正逻辑 ---
+                # 如果通道维 (3) 在最后，则进行 permute
+                if t.shape[-1] == 3 and t.shape[0] != 3:
+                    t = t.permute(2, 0, 1) # 变为 (3, H, W)
+                
+                # 归一化到 [0, 1] (重要：ResNet 标准输入)
+                if t.max() > 1.0:
+                    t = t / 255.0
+                
+                # 缩放到训练尺寸 64x64
+                t = TF.resize(t, [64, 64])
+                imgs.append(t)
             
-            if img is not None:
-                if img.ndim == 3 and img.shape[-1] in (1, 3):
-                    img = np.transpose(img, (2, 0, 1))
-                
-                # [关键修复] 手动 CenterCrop 到 60x60
-                # 先转 Tensor
-                img_tensor = torch.from_numpy(img).float() # (C, H, W)
-                
-                # # 执行 CenterCrop
-                # if crop_shape is not None:
-                #     img_tensor = TF.center_crop(img_tensor, crop_shape)
+            # 堆叠并增加 Batch 维度 -> (1, 2, 3, 64, 64)
+            img_batch = torch.stack(imgs).unsqueeze(0).to(device)
+            
+            # --- 最终形状保险锁 ---
+            # 期望形状是 (Batch=1, Time=2, Channel=3, Height=64, Width=64)
+            # 如果维度 2 不是 3，说明 Layout 依然是 HWC，强制纠正
+            if img_batch.shape[2] != 3 and img_batch.shape[-1] == 3:
+                # 假设当前是 (1, 2, 64, 64, 3) -> 转为 (1, 2, 3, 64, 64)
+                img_batch = img_batch.permute(0, 1, 4, 2, 3)
+            
+            obs_dict["camera_image"] = img_batch
 
-                target_shape = [128, 128] 
-                # print(f"[Client] Forcing crop shape to {target_shape} to match weight matrix (8320 dim)")
-                img_tensor = TF.resize(img_tensor, target_shape)
-                
-                # 增加 Batch 和 Horizon 维度: (1, 1, C, H, W)
-                img_tensor = img_tensor.unsqueeze(0).unsqueeze(0).to(device)
-                
-                obs_dict["camera_image"] = img_tensor
+            # 2. 状态处理 (1, 2, D)
+            states = [torch.from_numpy(o["state"]).float() for o in obs_deque]
+            obs_dict["state"] = torch.stack(states).unsqueeze(0).to(device)
 
-            if "state" in obs:
-                st = obs["state"]
-                st = st[None, None, ...]
-                obs_dict["state"] = torch.from_numpy(st).to(device).float()
+
 
             with torch.no_grad():
                 act_dict = policy.predict_action(obs_dict)
-                # 在 act_dict = policy.predict_action(obs_dict) 之后添加
-                # 定时保存图片
-                if ep_len % 10 == 1: # 每50步保存一张图
+                
+                # 每10步保存一次图像用于调试
+                if ep_len % 10 == 0:
                     import torchvision.utils as vutils
-                    # 提取并保存送入模型的图像
-                    img_to_save = obs_dict["camera_image"][0, 0] # 取出 (C, H, W)
-                    # 保存为 PNG 文件，到目录data/debug_images
-                    
-                    vutils.save_image(img_to_save / 255.0, f"{save_path}/_ep{ep}_step{ep_len}.png")
+                    img_to_save = obs_dict["camera_image"][0, -1] # 保存最新的一帧
+                    vutils.save_image(img_to_save, f"{save_path}/ep{ep}_step{ep_len}.png")
 
-                action = act_dict["action"][0, 0].cpu().numpy()
+                action_chunk = act_dict['action'][0, :4].cpu().numpy()
 
-            obs, reward, done, _, _ = env.step(action)
+            # --- 3. 执行动作块 (Action Chunking) ---
+            # 这里的逻辑是：预测一次，连续与环境交互 4次
+            step_count = 0
+            for i in range(len(action_chunk)):
+                action = action_chunk[i]
+                
+                # 执行当前这步动作
+                obs, reward, done = env.step(action)
+                
+                # 重要：每走一步都要更新观察队列，确保下一次预测能拿到最新的 2 帧
+                obs_deque.append(obs)
+                
+                ep_ret += reward
+                step_count += 1
+                
+                # 如果在执行 8 步的过程中环境已经结束（如撞墙或跟丢），提前跳出
+                if done:
+                    break
+            
+            # 8 步走完后，回到循环开头，进行下一次模型推理
+            obs_deque.append(obs)
             ep_ret += reward
             ep_len += 1
 
-        returns.append(ep_ret)
-        lengths.append(ep_len)
+        print(f"Episode {ep} Return: {ep_ret:.2f}")
 
     env.close()
-    print(f"Mean Return: {np.mean(returns):.2f}")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
-    run_eval(args.ckpt, port=args.port)
+    run_eval(args.ckpt, port=args.port, device=args.device)
 
 if __name__ == "__main__":
     main()

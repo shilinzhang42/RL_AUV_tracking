@@ -245,7 +245,7 @@ class TrainFlowMatchingUnetImageWorkspace(BaseWorkspace):
                     with torch.no_grad():
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
                         
-                        # 【核心修改】：对观测字典中的每一个张量进行切片，只取前 n_obs_steps 帧
+                        # 对观测字典中的每一个张量进行切片，只取前 n_obs_steps 帧
                         # 这样做是为了将维度从 131200 (16帧) 降回到 4224 (2帧)
                         obs_dict = {
                             k: v[:, :self.model.n_obs_steps] 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置路径
-CKPT="data/outputs/2025.12.24/11.12.38_train_flow_matching_unet_image_track_image/checkpoints/epoch=0014-val_loss=0.3482.ckpt"
+CKPT="data/outputs/2026.01.11/00.32.41_train_flow_matching_unet_image_track_image/checkpoints/epoch=0008-val_loss=0.3859.ckpt"
 ENV_CONFIG="configs/envs/3d_v1_config.yml"
 PORT=5555
 

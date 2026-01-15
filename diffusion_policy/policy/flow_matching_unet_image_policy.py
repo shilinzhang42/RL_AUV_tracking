@@ -40,6 +40,7 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
         self.action_dim = action_dim
         global_cond_dim = None
         if obs_as_global_cond:
+            # 建立 Dummy 时保持 float32 以确保初始化正常
             dummy_obs = self._build_dummy_obs(shape_meta)
             with torch.no_grad():
                 encoder_out = self.obs_encoder(dummy_obs)
@@ -61,88 +62,89 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
         dummy_obs = {}
         for key, attr in shape_meta['obs'].items():
             shape = tuple(attr['shape'])
-            # [修改点] 将 self.horizon 改为 self.n_obs_steps (通常是 2)
             tensor_shape = (1, self.n_obs_steps) + shape 
             dummy_obs[key] = torch.zeros(tensor_shape, dtype=torch.float32)
         return dummy_obs
-    # ================= 核心修改 1: 训练逻辑 =================
+
+    # ================= 核心修改 1: 内存优化版训练逻辑 =================
     def compute_loss(self, batch):
-        # 1. 数据预处理
+        # 1. 立即将原始 batch 移至 GPU (此时图像还是 uint8，占用 RAM 极小)
+        batch = dict_apply(batch, lambda x: x.to(self.device, non_blocking=True))
+
+        # 2. 观测数据预处理
         obs = batch['obs']
-        # 【关键修改】：只取前 n_obs_steps 帧作为编码器的输入
-        # 假设 obs 是一个字典，我们需要对里面的每个 tensor 进行切片
         compact_obs = dict()
         for key, value in obs.items():
-            # value 形状通常是 (B, horizon, ...)
-            compact_obs[key] = value[:, :self.n_obs_steps]
+            # 【优化】：先切片减少元素数量，再进行类型转换
+            # 维度从 (B, horizon, C, H, W) 变为 (B, n_obs_steps, C, H, W)
+            sliced_obs = value[:, :self.n_obs_steps]
+            
+            # 【关键修改】：仅在 GPU 上将图像从 uint8 转换为 float32
+            if 'image' in key and sliced_obs.dtype == torch.uint8:
+                compact_obs[key] = sliced_obs.float() / 255.0
+            else:
+                compact_obs[key] = sliced_obs
         
-        # 使用切片后的数据进行归一化和编码
+        # 3. 归一化与特征提取 (在 GPU 上并行)
         norm_obs = self.normalizer.normalize(compact_obs)
         global_cond = self.obs_encoder(norm_obs) 
-        # 现在 global_cond 的维度将是正确的 16512 (2帧)
 
-        # 后续逻辑保持不变...
+        # 4. 动作处理
+        # 确保动作也被正确归一化
         norm_action = self.normalizer['action'].normalize(batch['action'])
         batch_size = norm_action.shape[0]
 
-        # 2. 编码观测特征
-        global_cond = self.obs_encoder(norm_obs)
-
-        # 3. Flow Matching 核心逻辑
-        # 3.1 采样 x0 (Source Noise) ~ N(0, I)
+        # 5. Flow Matching 核心逻辑
+        # x1 是目标 (Expert Action), x0 是源噪声
         x1 = norm_action
         x0 = torch.randn_like(x1)
         
-        # 3.2 采样时间 t ~ Uniform[0, 1]
-        t = torch.rand((batch_size,), device=x1.device)
+        # 采样时间 t ~ Uniform[0, 1]
+        t = torch.rand((batch_size,), device=self.device)
         
-        # 3.3 构造插值路径 x_t = (1 - t) * x0 + t * x1
-        # 这里的 t 需要 reshape 以进行广播乘法
+        # 构造插值路径: x_t = (1 - t) \cdot x_0 + t \cdot x_1
         t_expand = t.view(-1, 1, 1)
         x_t = (1 - t_expand) * x0 + t_expand * x1
         
-        # 3.4 计算目标速度向量 (Target Velocity)
-        # d(x_t)/dt = x1 - x0
+        # 目标速度向量: v_t = x_1 - x_0
         target_v = x1 - x0
 
-        # 3.5 网络预测
-        # 注意：U-Net 通常期望 timestep 是整数或特定范围。
-        # 如果 ConditionalUnet1D 内部使用的是 Sinusoidal Embedding，传入 float [0,1] 也是可以的，
-        # 但为了保持与原 Diffusion 训练分布一致，通常建议缩放到 [0, 1000] 或类似范围，或者直接传 float。
-        # 这里我们直接传 t (float)，因为 Sinusoidal Embedding 对数值范围不敏感，只要一致即可。
+        # 6. 网络预测并计算 MSE Loss
         pred_v = self.model(x_t, t, global_cond=global_cond)
-
-        # 3.6 计算 MSE Loss
         loss = F.mse_loss(pred_v, target_v)
         
         return loss
 
-    # ================= 核心修改 2: 推理逻辑 (ODE Solver) =================
+    # ================= 核心修改 2: 内存优化版推理逻辑 =================
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        # 1. 数据预处理
-        norm_obs = self.normalizer.normalize(obs_dict)
+        # 1. 将输入移至 GPU
+        obs_dict = dict_apply(obs_dict, lambda x: x.to(self.device, non_blocking=True))
+
+        # 2. 同样的延迟类型转换策略
+        processed_obs = dict()
+        for key, value in obs_dict.items():
+            if 'image' in key and value.dtype == torch.uint8:
+                processed_obs[key] = value.float() / 255.0
+            else:
+                processed_obs[key] = value
+
+        # 3. 预处理与特征提取
+        norm_obs = self.normalizer.normalize(processed_obs)
         batch_size = next(iter(norm_obs.values())).shape[0]
         global_cond = self.obs_encoder(norm_obs)
 
-        # 2. 初始化 x (从标准高斯噪声开始，对应 t=0)
+        # 4. ODE Solver (Euler Method)
         action_dim = self.action_dim
         traj = torch.randn((batch_size, self.horizon, action_dim), device=self.device)
 
-        # 3. ODE Solver (Euler Method)
-        # 从 t=0 积分到 t=1
         steps = self.num_inference_steps
         dt = 1.0 / steps
         for i in range(steps):
-            # 当前时间 t
             t_val = torch.full((batch_size,), i / steps, device=self.device)
-            
-            # 预测速度场 v
             v = self.model(traj, t_val, global_cond=global_cond)
-            
-            # Euler 更新: x_new = x_old + v * dt
             traj = traj + v * dt
 
-        # 4. 后处理 (反归一化)
+        # 5. 反归一化并提取动作步
         traj = self.normalizer['action'].unnormalize(traj)
         start = self.n_obs_steps - 1
         end = start + self.n_action_steps

@@ -36,8 +36,8 @@ policy:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
       weights: null
-    resize_shape: [224, 224]
-    crop_shape: [200, 200]
+    resize_shape: [64, 64]
+    crop_shape: [60, 60]
     random_crop: True
     use_group_norm: True
     share_rgb_model: False
@@ -52,7 +52,7 @@ policy:
   
   # === 关键修改：针对 8GB 显存大幅缩小模型规模 ===
   # 原值 [512, 1024, 2048] 太大，改为 [256, 512, 1024]
-  down_dims: [256, 512, 1024]
+  down_dims: [512, 1024, 2048]
   kernel_size: 5
   n_groups: 8
   cond_predict_scale: True
@@ -66,18 +66,18 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
-  num_workers: 1
+  batch_size: 256
+  num_workers: 8
   shuffle: True
   pin_memory: True
-  persistent_workers: False
+  persistent_workers: True
 
 val_dataloader:
-  batch_size: 128
-  num_workers: 1
+  batch_size: 256
+  num_workers: 8
   shuffle: False
   pin_memory: True
-  persistent_workers: False
+  persistent_workers: True
 optimizer:
   _target_: torch.optim.AdamW
   lr: 3.0e-5
@@ -109,7 +109,7 @@ logging:
   project: auv_tracking_flow_matching
   resume: True
   # 如果没有网络，建议改为 offline
-  mode: online
+  mode: online  
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "flow_matching"]
 

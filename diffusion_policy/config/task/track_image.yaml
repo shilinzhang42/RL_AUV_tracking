@@ -4,13 +4,13 @@ shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
     camera_image:
-      shape: [3, 64, 64]  # 单帧图像，Dataset会返回(horizon, 3, 64, 64)
+      shape: [3, 224, 224]  # 单帧图像，Dataset会返回(horizon, 3, 64, 64)
       type: rgb
   action:
     shape: [4]
 
 dataset:
-  _target_: auv_track_launcher.dataset.auv_tracking_dataset.AUVTrackingDataset
+  _target_: diffusion_policy.dataset.zarr_uint8_image_dataset.ZarrUint8ImageDataset
   data_path: log/sample/3d_auv_data/auv_data_final.zarr
   key: ['action', 'camera_image', 'state']
   horizon: ${horizon}

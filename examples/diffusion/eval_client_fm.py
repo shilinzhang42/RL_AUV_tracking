@@ -22,19 +22,42 @@ from diffusion_policy.workspace.train_flow_matching_unet_image_workspace_custom 
 from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 
 def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
-    payload = torch.load(ckpt_path, map_location=device, weights_only=False)
+    print(f"[Client] Loading checkpoint to RAM...")
+    payload = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    
+    # --- 1. 修复 'pickles' 缺失 ---
+    if 'pickles' not in payload:
+        payload['pickles'] = {}
+
+    # --- 2. 修复 'state_dicts' 缺失 (核心修复) ---
+    # 如果 payload 里没有 state_dicts，但有 model 或 ema_model
+    # 说明这是个瘦身过的文件，我们需要手动包装一层
+    if 'state_dicts' not in payload:
+        print("[Client] Detected shrunk checkpoint, rebuilding state_dicts structure...")
+        payload['state_dicts'] = {}
+        
+        # 寻找可能的权重键名并移入 state_dicts
+        for key in ['model', 'ema_model', 'optimizer']:
+            if key in payload:
+                payload['state_dicts'][key] = payload.pop(key)
+    
+    # --- 3. 初始化并加载 ---
     cfg = payload["cfg"]
     workspace = TrainFlowMatchingUnetImageWorkspace(cfg)
+    
+    # 现在 payload 已经有了 pickles 和 state_dicts，load_payload 不会再报错
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     
     policy = workspace.model
     if getattr(workspace, "ema_model", None) is not None:
         policy = workspace.ema_model
+        print("[Client] Using EMA weights.")
     
+    print(f"[Client] Moving policy to {device}...")
     policy.to(device)
     policy.eval()
     
-    # 强制 obs_encoder 为 train 模式 (如果训练时用了 BatchNorm 或 Dropout)
+    # 保持原有的 encoder 模式
     policy.obs_encoder.train()
     
     # 禁用 CropRandomizer
@@ -47,8 +70,7 @@ def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
                     if isinstance(module, CropRandomizer):
                         transform[i] = nn.Identity()
 
-    # --- 已删除：手动替换 avgpool 和 fc 的逻辑 ---
-    print(f"[Client] Policy loaded. Using model pooling settings.")
+    print(f"[Client] Policy loaded successfully.")
     return policy, cfg
 
 class RemoteEnv:
@@ -156,7 +178,7 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
                 act_dict = policy.predict_action(obs_dict)
                 
                 # 每10步保存一次图像用于调试
-                if ep_len % 10 == 0:
+                if ep_len % 5 == 1:
                     import torchvision.utils as vutils
                     img_to_save = obs_dict["camera_image"][0, -1] # 保存最新的一帧
                     vutils.save_image(img_to_save, f"{save_path}/ep{ep}_step{ep_len}.png")
@@ -168,7 +190,7 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
             step_count = 0
             for i in range(len(action_chunk)):
                 action = action_chunk[i]
-                
+                action = -action  # 反向动作修正
                 # 执行当前这步动作
                 obs, reward, done = env.step(action)
                 

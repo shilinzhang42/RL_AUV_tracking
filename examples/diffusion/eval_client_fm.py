@@ -200,6 +200,12 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
             step_count = 0
             for i in range(len(action_chunk)):
                 action = action_chunk[i]
+                lqr_scales = np.array([0.5, 1.5708, 0.3, 0.1571])
+                action = action * lqr_scales
+                action = np.clip(action, 
+                                  a_min=[0.0, -1.57, -0.3, -0.15], 
+                                  a_max=[0.5, 1.57, 0.3, 0.15])
+                print(f"Episode {ep} Step {ep_len} Substep {i} Action: {action}")
                 obs, reward, done = env.step(action)
                 obs_deque.append(obs)
                 ep_ret += reward

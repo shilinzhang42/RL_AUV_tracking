@@ -195,18 +195,20 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
 
                 naction_chunk = act_dict['action']
                 action_chunk = normalizer['action'].unnormalize(naction_chunk)
-                action_chunk = action_chunk[0, :2].cpu().numpy()
+                action_chunk = action_chunk[0, :1].cpu().numpy()
 
             step_count = 0
             for i in range(len(action_chunk)):
                 action = action_chunk[i]
                 lqr_scales = np.array([0.5, 1.5708, 0.3, 0.1571])
-                action = action * lqr_scales
+                # action = action * lqr_scales
                 action = np.clip(action, 
                                   a_min=[0.0, -1.57, -0.3, -0.15], 
                                   a_max=[0.5, 1.57, 0.3, 0.15])
                 print(f"Episode {ep} Step {ep_len} Substep {i} Action: {action}")
-                obs, reward, done = env.step(action)
+                for _ in range(6):
+                    obs, reward, done = env.step(action) 
+                    if done: break
                 obs_deque.append(obs)
                 ep_ret += reward
                 step_count += 1

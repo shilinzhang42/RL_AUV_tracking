@@ -12,6 +12,7 @@ global*
 *data/
 
 *.mp4
+current_question.md
 *gz
 tmp*
 observations.json

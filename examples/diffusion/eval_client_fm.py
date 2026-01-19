@@ -80,7 +80,7 @@ def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
         # print("Available keys:", policy.state_dict().keys())
     print("-" * 30)
     # ------------------------------------------------------
-    policy.obs_encoder.train()
+    policy.obs_encoder.eval()
 
     if hasattr(policy.obs_encoder, 'key_transform_map'):
         for key, transform in policy.obs_encoder.key_transform_map.items():
@@ -202,10 +202,11 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
                 action = action_chunk[i]
                 lqr_scales = np.array([0.5, 1.5708, 0.3, 0.1571])
                 # action = action * lqr_scales
-                action = np.clip(action, 
-                                  a_min=[0.0, -1.57, -0.3, -0.15], 
-                                  a_max=[0.5, 1.57, 0.3, 0.15])
-                print(f"Episode {ep} Step {ep_len} Substep {i} Action: {action}")
+                # action = np.clip(action, 
+                                #   a_min=[0.0, -1.57, -0.3, -0.15], 
+                                #   a_max=[1, 1.57, 0.3, 0.15])
+                print(f"Episode {ep} Step {ep_len} Action: {action}")
+                action = np.array([0, 0, 0.9, 0])
                 for _ in range(6):
                     obs, reward, done = env.step(action) 
                     if done: break

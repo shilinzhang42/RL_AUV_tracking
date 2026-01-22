@@ -203,6 +203,8 @@ class TrainFlowMatchingUnetImageWorkspace(BaseWorkspace):
                         # 【核心修改】显式释放大对象并清理显存缓存，防止下个 Epoch 初始内存抖动
                         del batch, obs_dict, result, pred_action, gt_action_slice
                         torch.cuda.empty_cache()
+                        import gc
+                        gc.collect() # 显式触发系统垃圾回收 (非常重要)
                         
                 run_logger.log(step_log, step=self.global_step)
                 # 3. 保存 Checkpoint

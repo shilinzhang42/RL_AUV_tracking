@@ -9,7 +9,7 @@ def get_resnet(name, weights=None, **kwargs):
     # load r3m weights
     if (weights == "r3m") or (weights == "R3M"):
         return get_r3m(name=name, **kwargs)
-    print(f"DEBUG: get_resnet is called for {name}!") # 加上这一行
+
     func = getattr(torchvision.models, name)
     resnet = func(weights=weights, **kwargs)
 

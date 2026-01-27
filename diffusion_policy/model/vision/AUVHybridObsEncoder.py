@@ -1,47 +1,77 @@
 import torch
 import torch.nn as nn
+import copy
 from diffusion_policy.model.vision.multi_image_obs_encoder import MultiImageObsEncoder
 
 class AUVHybridObsEncoder(nn.Module):
-    def __init__(self, shape_meta, rgb_model, resize_shape=None, crop_shape=None, **kwargs):
+    def __init__(self, shape_meta, **kwargs):
         super().__init__()
         
-        # 1. 视觉部分：继续使用框架成熟的 MultiImageObsEncoder
-        # 它会自动根据 shape_meta 处理 'camera_image'
+        # 1. 深度拷贝一份配置，并移除所有非图像键
+        # 这样内部的 MultiImageObsEncoder 就不会去寻找 'state' 了
+        internal_meta = copy.deepcopy(shape_meta)
+        obs_meta = internal_meta['obs']
+        
+        self.rgb_keys = []
+        self.low_dim_keys = []
+        
+        # 分类存储键名
+        for k, v in shape_meta['obs'].items():
+            if v.get('type') == 'rgb':
+                self.rgb_keys.append(k)
+            else:
+                self.low_dim_keys.append(k)
+                # 从内部配置中删除低维键
+                if k in obs_meta:
+                    del obs_meta[k]
+
+        # 2. 实例化内部编码器（它现在只处理图像）
         self.vision_encoder = MultiImageObsEncoder(
-            shape_meta=shape_meta,
-            rgb_model=rgb_model,
-            resize_shape=resize_shape,
-            crop_shape=crop_shape,
+            shape_meta=internal_meta,
             **kwargs
         )
         
-        # 2. 确定低维状态维度
-        # 根据你的 Zarr 结构，state 维度为 8
-        self.state_key = 'state'
-        self.state_dim = 8
-        self.n_obs_steps = 2 # 对应你的 n_obs_steps 配置
-        
-        # 3. 计算最终输出维度
-        # vision_encoder 的输出维度通常是 512 (ResNet18) * 空间池化系数
-        # 假设 ResNet 输出 2048 维，加上 2 帧 * 8 维 state
-        self.output_features_dim = self.vision_encoder.output_shape()[0] + (self.state_dim * self.n_obs_steps)
+        # 记录原始配置用于维度推算
+        self.full_shape_meta = shape_meta
 
     def forward(self, obs_dict):
-        # 提取视觉特征: [B, Vision_Dim]
-        vision_feat = self.vision_encoder(obs_dict)
-        
-        # 提取低维状态特征
-        # obs_dict['state'] 形状为 [B, Horizon, 8]，我们只取前 n_obs_steps 帧
-        state_feat = obs_dict[self.state_key][:, :self.n_obs_steps, :]
-        
-        # 将 [B, 2, 8] 展平为 [B, 16]
-        state_feat_flat = state_feat.reshape(state_feat.shape[0], -1)
-        
-        # 特征拼接: [B, Vision_Dim + 16]
-        combined_feat = torch.cat([vision_feat, state_feat_flat], dim=-1)
-        
-        return combined_feat
+        batch_size = None
+        features = list()
 
+        # 1. 视觉特征提取 (只把图像键传进去)
+        vision_obs_dict = {k: obs_dict[k] for k in self.rgb_keys}
+        vision_feat = self.vision_encoder(vision_obs_dict)
+        features.append(vision_feat)
+
+        # 2. 手动接管低维状态 (state)
+        for key in self.low_dim_keys:
+            data = obs_dict[key]
+            if batch_size is None:
+                batch_size = data.shape[0]
+            
+            # 将 (B, T, D) 展平为 (B, T*D)
+            if len(data.shape) == 3:
+                features.append(data.reshape(batch_size, -1))
+            else:
+                features.append(data)
+
+        # 3. 拼接视觉与状态特征
+        return torch.cat(features, dim=-1)
+
+    @torch.no_grad()
     def output_shape(self):
-        return (self.output_features_dim,)
+        # 自动推算总维度：视觉维度 + (状态维度 * 观测步数)
+        v_shape = self.vision_encoder.output_shape()
+        v_dim = v_shape[0]
+        
+        # 假设 n_obs_steps 为 2 (需与你的配置同步)
+        n_obs = 2 
+        
+        ld_dim = 0
+        for k in self.low_dim_keys:
+            # 取得 [8]
+            shape = self.full_shape_meta['obs'][k]['shape']
+            import numpy as np
+            ld_dim += np.prod(shape) * n_obs
+            
+        return (int(v_dim + ld_dim),)

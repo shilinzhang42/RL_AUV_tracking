@@ -30,7 +30,7 @@ policy:
     shift: 1.0 
 
   obs_encoder:
-    _target_: diffusion_policy.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    _target_: diffusion_policy.model.vision.AUVHybridObsEncoder.AUVHybridObsEncoder
     shape_meta: ${shape_meta}
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet

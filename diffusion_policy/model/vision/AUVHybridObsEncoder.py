@@ -7,71 +7,79 @@ class AUVHybridObsEncoder(nn.Module):
     def __init__(self, shape_meta, **kwargs):
         super().__init__()
         
-        # 1. 深度拷贝一份配置，并移除所有非图像键
-        # 这样内部的 MultiImageObsEncoder 就不会去寻找 'state' 了
+        # 1. 提取配置
         internal_meta = copy.deepcopy(shape_meta)
         obs_meta = internal_meta['obs']
-        
         self.rgb_keys = []
         self.low_dim_keys = []
         
-        # 分类存储键名
+        # 获取 n_obs_steps，默认为 2，最好从外部传入或从某处读取
+        # 在 diffusion_policy 中，通常可以从 kwargs 获取
+        self.n_obs_steps = kwargs.get('n_obs_steps', 2) 
+
         for k, v in shape_meta['obs'].items():
             if v.get('type') == 'rgb':
                 self.rgb_keys.append(k)
             else:
                 self.low_dim_keys.append(k)
-                # 从内部配置中删除低维键
                 if k in obs_meta:
                     del obs_meta[k]
 
-        # 2. 实例化内部编码器（它现在只处理图像）
-        self.vision_encoder = MultiImageObsEncoder(
-            shape_meta=internal_meta,
-            **kwargs
+        # 2. 实例化内部视觉编码器
+        self.vision_encoder = MultiImageObsEncoder(shape_meta=internal_meta, **kwargs)
+        
+        # 3. 【核心修正】自动计算输入维度
+        # 遍历所有 low_dim 键，计算总维度
+        total_low_dim_input = 0
+        for k in self.low_dim_keys:
+            dim = shape_meta['obs'][k]['shape'][0]
+            total_low_dim_input += dim * self.n_obs_steps
+        
+        print(f"[Encoder] 自动计算 Low-Dim 输入总维度: {total_low_dim_input} (Steps: {self.n_obs_steps})")
+
+        self.project_dim = 256 
+        self.state_projector = nn.Sequential(
+            nn.Linear(total_low_dim_input, self.project_dim),
+            nn.LayerNorm(self.project_dim),
+            nn.ReLU(),
+            nn.Linear(self.project_dim, self.project_dim),
+            nn.ReLU()
         )
         
-        # 记录原始配置用于维度推算
         self.full_shape_meta = shape_meta
 
     def forward(self, obs_dict):
         batch_size = None
         features = list()
 
-        # 1. 视觉特征提取 (只把图像键传进去)
+        # 1. 提取视觉特征 (B, 2048)
         vision_obs_dict = {k: obs_dict[k] for k in self.rgb_keys}
         vision_feat = self.vision_encoder(vision_obs_dict)
+        batch_size = vision_feat.shape[0]
         features.append(vision_feat)
 
-        # 2. 手动接管低维状态 (state)
+        # 2. 提取并投影状态特征
         for key in self.low_dim_keys:
-            data = obs_dict[key]
-            if batch_size is None:
-                batch_size = data.shape[0]
+            data = obs_dict[key]  # 可能形状是 (B, 16, 8) 或 (B, 6, 8) 或 (B, 2, 8)
             
-            # 将 (B, T, D) 展平为 (B, T*D)
+            # 【核心修正】强制截断，只取前 self.n_obs_steps 步
+            # 这样无论 dummy_obs 给多少，我们只处理定义的 2 步 (16维)
             if len(data.shape) == 3:
-                features.append(data.reshape(batch_size, -1))
+                data = data[:, :self.n_obs_steps, :] 
+                data_flat = data.reshape(batch_size, -1) # 结果一定是 (B, 16)
             else:
-                features.append(data)
+                data_flat = data
 
-        # 3. 拼接视觉与状态特征
-        return torch.cat(features, dim=-1)
+            # 现在的 data_flat 一定是 (B, 16)，可以安全通过 (16x256) 的线性层
+            projected_state = self.state_projector(data_flat)
+            features.append(projected_state)
+
+        # 3. 拼接：[B, 2048 + 256]
+        combined_feat = torch.cat(features, dim=-1)
+        return combined_feat
 
     @torch.no_grad()
     def output_shape(self):
-        # 自动推算总维度：视觉维度 + (状态维度 * 观测步数)
         v_shape = self.vision_encoder.output_shape()
-        v_dim = v_shape[0]
-        
-        # 假设 n_obs_steps 为 2 (需与你的配置同步)
-        n_obs = 2 
-        
-        ld_dim = 0
-        for k in self.low_dim_keys:
-            # 取得 [8]
-            shape = self.full_shape_meta['obs'][k]['shape']
-            import numpy as np
-            ld_dim += np.prod(shape) * n_obs
-            
-        return (int(v_dim + ld_dim),)
+        # 现在的总维度是：视觉输出 + 投影后的状态维度
+        return (int(v_shape[0] + self.project_dim),)

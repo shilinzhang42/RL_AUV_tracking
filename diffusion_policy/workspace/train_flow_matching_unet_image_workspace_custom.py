@@ -209,9 +209,9 @@ class TrainFlowMatchingUnetImageWorkspace(BaseWorkspace):
                 run_logger.log(step_log, step=self.global_step)
                 # 3. 保存 Checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
-                    self.save_checkpoint()
-                    topk_manager.get_ckpt_path(step_log)
-
+                    topk_path = topk_manager.get_ckpt_path(step_log)
+                    if topk_path is not None:
+                        self.save_checkpoint(path=topk_path)
                 self.epoch += 1
 
 @hydra.main(

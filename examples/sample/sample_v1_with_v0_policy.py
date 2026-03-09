@@ -15,9 +15,24 @@ os.chdir(ROOT_DIR)
 import auv_env
 from config_loader import load_config
 import numpy as np
-from stable_baselines3 import SAC
+from stable_baselines3 import SAC,PPO
 from auv_env.wrappers import StateOnlyWrapper
 from auv_track_launcher.dataset.data_collector import AUVCollector
+
+def get_model_class(alg_config_path):
+    """根据配置文件路径或内容自动识别算法类"""
+    config = load_config(alg_config_path)
+    # 优先从配置文件的 'name' 字段读取，没有则从文件名判断
+    alg_name = config.get('name', alg_config_path).lower()
+    
+    if 'ppo' in alg_name:
+        print(f"检测到算法类型: PPO")
+        return PPO
+    elif 'sac' in alg_name:
+        print(f"检测到算法类型: SAC")
+        return SAC
+    else:
+        raise ValueError(f"无法识别算法类型: {alg_name}。请确保配置文件名包含 'sac' 或 'ppo'。")
 
 
 def sample_episodes_v1_with_v0_policy(
@@ -57,6 +72,7 @@ def sample_episodes_v1_with_v0_policy(
     print(f"最大episode步数 (t_steps): {t_steps}")
     print(f"模型路径: {model_path}")
     print("=" * 60)
+    ModelClass = get_model_class(alg_config_path)
     
     # 2. 创建环境
     print("\n创建环境...")
@@ -69,11 +85,11 @@ def sample_episodes_v1_with_v0_policy(
     )
     
     # 3. 加载模型
-    print("\n加载SAC模型...")
+    print(f"\n加载模型 ({ModelClass.__name__})...")
     # 注意：如果v0和v1的观察空间不同，需要使用StateOnlyWrapper
     # 因为SAC模型是在v0的state观察空间上训练的
     wrapped_env = StateOnlyWrapper(env)
-    model = SAC.load(
+    model = ModelClass.load(
         model_path,
         device='cuda',
         env=wrapped_env,
@@ -200,6 +216,7 @@ def analyze_episode_truncation(
     
     env_config = load_config(env_config_path)
     alg_config = load_config(alg_config_path)
+    ModelClass = get_model_class(alg_config_path)
     t_steps = env_config.get('t_steps', 1000)
     
     env = auv_env.make(
@@ -211,7 +228,7 @@ def analyze_episode_truncation(
     )
     
     wrapped_env = StateOnlyWrapper(env)
-    model = SAC.load(
+    model = ModelClass.load(
         model_path,
         device='cuda',
         env=wrapped_env,

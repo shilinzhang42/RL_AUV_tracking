@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置路径
-CKPT="/home/zsl/RL_AUV_tracking/data/outputs/2026.01.15/shrunk_model.ckpt"
+CKPT="/home/zsl/RL_AUV_tracking/data/outputs/2026.02.06/epoch=0005-val_loss=0.3581.ckpt"
 ENV_CONFIG="configs/envs/3d_v1_config.yml"
 PORT=5555
 

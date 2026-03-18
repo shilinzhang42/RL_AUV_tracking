@@ -206,7 +206,6 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
                                 #   a_min=[0.0, -1.57, -0.3, -0.15], 
                                 #   a_max=[1, 1.57, 0.3, 0.15])
                 print(f"Episode {ep} Step {ep_len} Action: {action}")
-                action = np.array([0, 0, 0.9, 0])
                 for _ in range(6):
                     obs, reward, done = env.step(action) 
                     if done: break

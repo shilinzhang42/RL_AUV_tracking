@@ -23,9 +23,9 @@ python examples/sample/sample_v1_with_v0_policy.py \
 
 ```bash
 python examples/sample/sample_v1_with_v0_policy.py \
-    --model_path log/AUVTracking_v0/PID/SAC/12-20_01/rl_model_999990_steps.zip \
+    --model_path /home/zsl/RL_AUV_tracking/media/best_model.zip \
     --env_config configs/envs/v1_config.yml \
-    --alg_config configs/algorithm/sac.yml \
+    --alg_config configs/algorithm/ppo.yml \
     --analyze \
     --n_episodes 50
 ```

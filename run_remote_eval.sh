@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # 配置路径
-CKPT="/home/zsl/RL_AUV_tracking/data/outputs/2026.02.06/epoch=0005-val_loss=0.3581.ckpt"
-ENV_CONFIG="configs/envs/3d_v1_config.yml"
+CKPT="data/outputs/epoch=0008-val_loss=0.0321.ckpt"
+ENV_CONFIG="configs/envs/v1_config.yml"
 PORT=5555
 
 # 1. 启动 Server (HoloOcean 环境)

@@ -101,5 +101,5 @@ def print_dataset_info(data_path):
 
 if __name__ == '__main__':
     # 查看 v1_episodes 数据集
-    data_path = 'log/sample/v1_episodes/auv_data_final.zarr'
+    data_path = 'log/sample/v1_episodes1/auv_data_final.zarr'
     print_dataset_info(data_path)

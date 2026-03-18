@@ -68,9 +68,11 @@ class ZarrUint8ImageDataset(BaseImageDataset):
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        print(f"DEBUG: Action Normalizer Max: {normalizer['action'].params_dict['stats_max']}")
         
         # 【修改点 2】只为存在的键提供 normalizer
         normalizer['camera_image'] = get_image_range_normalizer()
+        print(f"DEBUG: Camera Image Normalizer Max: {normalizer['camera_image'].params_dict['stats_max']}")
         return normalizer
 
     def __len__(self) -> int:

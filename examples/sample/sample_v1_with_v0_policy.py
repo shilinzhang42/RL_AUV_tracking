@@ -253,6 +253,7 @@ def analyze_episode_truncation(
                 state_obs = obs
             
             action, _ = model.predict(state_obs, deterministic=True)
+            print(f"Episode {episode + 1} Step {step} Action: {action}")
             obs, reward, terminated, truncated, info = env.step(action)
             step += 1
             

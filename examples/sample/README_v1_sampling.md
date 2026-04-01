@@ -12,22 +12,22 @@
 cd /home/dell-t3660tow/data/RL/RL_AUV_tracking/RL_AUV_tracking
 
 python examples/sample/sample_v1_with_v0_policy.py \
-    --model_path log/AUVTracking_v0/PID/SAC/12-20_01/rl_model_999990_steps.zip \
+    --model_path model.zip  \ 
     --env_config configs/envs/v1_config.yml \
     --alg_config configs/algorithm/sac.yml \
-    --n_episodes 50 \
-    --save_dir log/sample/v1_episodes
+    --n_episodes 100 \
+    --save_dir log/sample/v1_episodes_lqr_sac
 ```
 
 ### 2. 先分析截断合理性再采样
 
 ```bash
 python examples/sample/sample_v1_with_v0_policy.py \
-    --model_path /home/zsl/RL_AUV_tracking/media/best_model.zip \
+    --model_path model.zip \ 
     --env_config configs/envs/v1_config.yml \
-    --alg_config configs/algorithm/ppo.yml \
+    --alg_config configs/algorithm/sac.yml \
     --analyze \
-    --n_episodes 50
+    --n_episodes 10
 ```
 
 ### 3. 参数说明

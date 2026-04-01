@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置路径
-CKPT="data/outputs/epoch=0008-val_loss=0.0321.ckpt"
+CKPT="/home/zsl/RL_AUV_tracking/data/outputs/06.28.52_train_flow_matching_unet_image_track_image/checkpoints/epoch=0011-val_loss=0.2445.ckpt"
 ENV_CONFIG="configs/envs/v1_config.yml"
 PORT=5555
 

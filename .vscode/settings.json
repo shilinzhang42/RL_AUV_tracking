@@ -1,5 +1,12 @@
 {
     "ros.distro": "noetic",
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": [
+        {
+            "path": "log/sample/v1_episodes_lqr_sac",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ]
 }

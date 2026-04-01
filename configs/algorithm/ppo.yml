@@ -2,11 +2,9 @@
 # Can be merged with a main environment config
 
 training:
-  device: "cuda:3"
+  device: "cuda:0"
   seed: 46
   nb_envs: 2
-  timesteps: 2000000
-  nb_envs: 5
   timesteps: 2000000
   batch_size: 64
   save_freq: 200000

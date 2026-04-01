@@ -143,8 +143,8 @@ class RemoteEnv:
             parsed["state"] = np.array(obs_dict["state"], dtype=np.float32)
         return parsed
 
-def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
-    policy, cfg, normalizer = load_flow_matching_policy(ckpt_path, device)
+def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555, short_exec_steps=3):
+    policy, cfg, _normalizer = load_flow_matching_policy(ckpt_path, device)
     n_obs_steps = cfg.n_obs_steps
     env = RemoteEnv(port=port)
     obs_deque = collections.deque(maxlen=n_obs_steps)
@@ -170,7 +170,8 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
                 if t.shape[-1] == 3 and t.shape[0] != 3:
                     t = t.permute(2, 0, 1)
                 if t.max() > 1.0:
-                    t = t / 255.0
+                    t = t / 255.0          # 先到 [0, 1]
+                    # t = t * 2.0 - 1.0      # 再到 [-1, 1] (这一步之前漏掉了！)
                 t = TF.resize(t, [64, 64])
                 imgs.append(t)
             img_batch = torch.stack(imgs).unsqueeze(0).to(device)
@@ -193,31 +194,19 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555):
                     img_to_save = obs_dict["camera_image"][0, -1]
                     vutils.save_image(img_to_save, f"{save_path}/ep{ep}_step{ep_len}.png")
 
-                naction_chunk = act_dict['action']
-                action_chunk = normalizer['action'].unnormalize(naction_chunk)
-                action_chunk = action_chunk[0, :1].cpu().numpy()
+                # 短段执行：每次推理后，连续执行前 K 个动作，再重新感知并重规划
+                action_chunk = act_dict['action'][0].cpu().numpy()
 
-            step_count = 0
-            for i in range(len(action_chunk)):
-                action = action_chunk[i]
-                lqr_scales = np.array([0.5, 1.5708, 0.3, 0.1571])
-                # action = action * lqr_scales
-                # action = np.clip(action, 
-                                #   a_min=[0.0, -1.57, -0.3, -0.15], 
-                                #   a_max=[1, 1.57, 0.3, 0.15])
-                print(f"Episode {ep} Step {ep_len} Action: {action}")
-                for _ in range(6):
-                    obs, reward, done = env.step(action) 
-                    if done: break
+            exec_steps = min(short_exec_steps, action_chunk.shape[0])
+            for k in range(exec_steps):
+                action = action_chunk[k]
+                print(f"Episode {ep} Step {ep_len} ChunkStep {k} Action: {action}")
+                obs, reward, done = env.step(action)
                 obs_deque.append(obs)
                 ep_ret += reward
-                step_count += 1
+                ep_len += 1
                 if done:
                     break
-            
-            obs_deque.append(obs)
-            ep_ret += reward
-            ep_len += 1
 
         print(f"Episode {ep} Return: {ep_ret:.2f}")
 
@@ -228,8 +217,11 @@ def main():
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--short_exec_steps", type=int, default=2,
+                        help="每次推理后连续执行的动作步数")
     args = parser.parse_args()
-    run_eval(args.ckpt, port=args.port, device=args.device)
+    run_eval(args.ckpt, port=args.port, device=args.device,
+             short_exec_steps=max(1, args.short_exec_steps))
 
 if __name__ == "__main__":
     main()

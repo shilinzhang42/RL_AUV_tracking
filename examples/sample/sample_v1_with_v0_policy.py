@@ -19,6 +19,50 @@ from stable_baselines3 import SAC,PPO
 from auv_env.wrappers import StateOnlyWrapper
 from auv_track_launcher.dataset.data_collector import AUVCollector
 
+
+def apply_episode_distribution_profile(env, profile, base_min_init_dist=1.8):
+    """Dynamically adjust reset-time distribution to collect more learnable and diverse data."""
+    cfg = env.config
+    target_cfg = cfg['target']
+    lqr_cfg = target_cfg['controller_config']['LQR']
+
+    # Enable randomness for data collection diversification
+    cfg['env']['task_random'] = True
+    target_cfg['random'] = True
+    lqr_cfg['random_lp'] = True
+
+    # Shared defaults
+    target_cfg['lin_dist_range_t2b'] = [0.0, 2.5]
+    target_cfg['ang_dist_range_t2b'] = [-np.pi / 2, np.pi / 2]
+
+    if profile == 'fast_lateral':
+        # Wider initial bearing and higher target process noise -> more fast crossing motions.
+        target_cfg['lin_dist_range_a2t'] = [base_min_init_dist, 5.0]
+        target_cfg['ang_dist_range_a2t'] = [-np.pi / 2, np.pi / 2]
+        target_cfg['const_q'] = [1.5, [0.8, 1.0, 1.5, 2.0, 3.0]]
+        lqr_cfg['l_p'] = [30, [20, 30, 50, 75, 100, 150, 200]]
+    elif profile == 'near_relock':
+        # Intentionally closer starts to collect "avoid + relock" trajectories.
+        target_cfg['lin_dist_range_a2t'] = [1.2, 2.6]
+        target_cfg['ang_dist_range_a2t'] = [-np.pi / 2, np.pi / 2]
+        target_cfg['const_q'] = [1.0, [0.5, 0.8, 1.0, 1.5, 2.0]]
+        lqr_cfg['l_p'] = [50, [30, 50, 75, 100, 150, 200]]
+    else:
+        # Baseline: safer initial spacing and moderate motion diversity.
+        target_cfg['lin_dist_range_a2t'] = [base_min_init_dist, 4.5]
+        target_cfg['ang_dist_range_a2t'] = [-np.pi / 3, np.pi / 3]
+        target_cfg['const_q'] = [0.8, [0.4, 0.5, 0.8, 1.0, 1.5]]
+        lqr_cfg['l_p'] = [30, [20, 30, 50, 75, 100]]
+
+
+def choose_episode_profile(rng, fast_lateral_ratio, near_relock_ratio):
+    p = rng.random()
+    if p < near_relock_ratio:
+        return 'near_relock'
+    if p < near_relock_ratio + fast_lateral_ratio:
+        return 'fast_lateral'
+    return 'baseline'
+
 def get_model_class(alg_config_path):
     """根据配置文件路径或内容自动识别算法类"""
     config = load_config(alg_config_path)
@@ -44,7 +88,12 @@ def sample_episodes_v1_with_v0_policy(
     min_length: int = 300,
     truncate_tail: int = 100,
     show_viewport: bool = False,
-    deterministic: bool = True
+    deterministic: bool = True,
+    curriculum_distribution: bool = True,
+    base_min_init_dist: float = 1.8,
+    fast_lateral_ratio: float = 0.35,
+    near_relock_ratio: float = 0.25,
+    seed: int = 42
 ):
     """
     使用v0训练的SAC策略在v1环境中采样episodes
@@ -59,6 +108,11 @@ def sample_episodes_v1_with_v0_policy(
         truncate_tail: 截断尾部步数，有效episode会舍弃最后这么多步
         show_viewport: 是否显示可视化
         deterministic: 是否使用确定性策略（True=评估模式，False=探索模式）
+        curriculum_distribution: 是否启用按episode分布采样（基线/快横移/近距重锁定）
+        base_min_init_dist: 基线场景的初始距离下限
+        fast_lateral_ratio: 快横移场景占比
+        near_relock_ratio: 近距避让+重锁定场景占比
+        seed: 随机种子
     """
     # 1. 加载配置
     print("=" * 60)
@@ -119,9 +173,21 @@ def sample_episodes_v1_with_v0_policy(
     episode_lengths = []
     truncated_count = 0
     terminated_count = 0
+    profile_stats = {'baseline': 0, 'fast_lateral': 0, 'near_relock': 0}
+    rng = np.random.default_rng(seed)
     
     for episode in range(n_episodes):
         print(f"\nEpisode {episode + 1}/{n_episodes}")
+
+        if curriculum_distribution:
+            profile = choose_episode_profile(rng, fast_lateral_ratio, near_relock_ratio)
+            apply_episode_distribution_profile(
+                env=env,
+                profile=profile,
+                base_min_init_dist=base_min_init_dist
+            )
+            profile_stats[profile] += 1
+            print(f"  分布场景: {profile}")
         
         collector.start_episode()
         
@@ -183,6 +249,11 @@ def sample_episodes_v1_with_v0_policy(
     print(f"  舍弃episodes: {n_episodes - valid_episodes}")
     print(f"  通过terminated结束: {terminated_count}")
     print(f"  通过truncated结束: {truncated_count}")
+    if curriculum_distribution:
+        print("  分布场景计数:")
+        print(f"    - baseline: {profile_stats['baseline']}")
+        print(f"    - fast_lateral: {profile_stats['fast_lateral']}")
+        print(f"    - near_relock: {profile_stats['near_relock']}")
     if episode_lengths:
         print(f"  Episode长度统计:")
         print(f"    - 平均: {np.mean(episode_lengths):.1f} 步")
@@ -320,6 +391,19 @@ if __name__ == '__main__':
                        help='先分析episode截断合理性（运行少量测试episodes）')
     parser.add_argument('--deterministic', action='store_true', default=True,
                        help='是否使用确定性策略（默认True）')
+    parser.add_argument('--curriculum_distribution', action='store_true', default=True,
+                       help='启用按episode动态分布采样')
+    parser.add_argument('--no_curriculum_distribution', action='store_false',
+                       dest='curriculum_distribution',
+                       help='关闭按episode动态分布采样')
+    parser.add_argument('--base_min_init_dist', type=float, default=1.6,
+                       help='基线场景初始距离下限')
+    parser.add_argument('--fast_lateral_ratio', type=float, default=0.35,
+                       help='快横移场景占比')
+    parser.add_argument('--near_relock_ratio', type=float, default=0.25,
+                       help='近距避让+重锁定场景占比')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='分布采样随机种子')
     
     args = parser.parse_args()
     
@@ -346,6 +430,11 @@ if __name__ == '__main__':
         min_length=args.min_length,
         truncate_tail=args.truncate_tail,
         show_viewport=args.show_viewport,
-        deterministic=args.deterministic
+        deterministic=args.deterministic,
+        curriculum_distribution=args.curriculum_distribution,
+        base_min_init_dist=args.base_min_init_dist,
+        fast_lateral_ratio=args.fast_lateral_ratio,
+        near_relock_ratio=args.near_relock_ratio,
+        seed=args.seed
     )
 

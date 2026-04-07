@@ -12,7 +12,7 @@
 cd /home/dell-t3660tow/data/RL/RL_AUV_tracking/RL_AUV_tracking
 
 python examples/sample/sample_v1_with_v0_policy.py \
-    --model_path model.zip  \ 
+    --model_path model.zip  \
     --env_config configs/envs/v1_config.yml \
     --alg_config configs/algorithm/sac.yml \
     --n_episodes 100 \

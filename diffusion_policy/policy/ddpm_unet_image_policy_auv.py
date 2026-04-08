@@ -130,16 +130,8 @@ class DDPMUnetImagePolicyAUV(BaseImagePolicy):
             (batch_size,), device=self.device
         )
         
-        # 使用调度器的 alpha_cumprod 计算加噪后的 x_t
-        # x_t = sqrt(alpha_cumprod_t) * x_0 + sqrt(1 - alpha_cumprod_t) * noise
-        sqrt_alphas_cumprod = self.noise_scheduler.alphas_cumprod[timesteps].sqrt()
-        sqrt_one_minus_alphas_cumprod = (1.0 - self.noise_scheduler.alphas_cumprod[timesteps]).sqrt()
-        
-        # 展开维度以支持矩阵乘法
-        sqrt_alphas_cumprod = sqrt_alphas_cumprod.view(-1, 1, 1)
-        sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod.view(-1, 1, 1)
-        
-        x_t = sqrt_alphas_cumprod * x_0 + sqrt_one_minus_alphas_cumprod * noise
+        # 与 diffusion policy 基线保持一致：通过 scheduler.add_noise 处理不同设备细节
+        x_t = self.noise_scheduler.add_noise(x_0, noise, timesteps.long())
 
         # 6. 网络预测噪声并计算 MSE Loss
         pred_noise = self.model(x_t, timesteps, global_cond=global_cond)

@@ -15,7 +15,6 @@ import pathlib
 from torch.utils.data import DataLoader
 import copy
 import random
-import wandb
 import tqdm
 import numpy as np
 import shutil
@@ -108,22 +107,24 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
                 model=self.ema_model)
 
         # configure env
-        env_runner: BaseImageRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseImageRunner)
+        env_runner: BaseImageRunner = None
+        env_runner_cfg = OmegaConf.select(cfg, "task.env_runner")
+        if env_runner_cfg is not None:
+            env_runner = hydra.utils.instantiate(
+                env_runner_cfg,
+                output_dir=self.output_dir)
+            assert isinstance(env_runner, BaseImageRunner)
+        else:
+            print("[DDPM Policy] cfg.task.env_runner is not set; rollout evaluation will be skipped.")
 
         # configure logging
-        wandb_run = wandb.init(
-            dir=str(self.output_dir),
+        print("Using swanlab for logging")
+        import swanlab
+        run_logger = swanlab.init(
+            project=cfg.logging.project,
+            experiment_name=cfg.logging.name,
+            logdir=str(self.output_dir),
             config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
-        )
-        wandb.config.update(
-            {
-                "output_dir": self.output_dir,
-            }
         )
 
         # configure checkpoint
@@ -199,7 +200,7 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
-                            wandb_run.log(step_log, step=self.global_step)
+                            run_logger.log(step_log, step=self.global_step)
                             json_logger.log(step_log)
                             self.global_step += 1
 
@@ -219,7 +220,7 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if env_runner is not None and (self.epoch % cfg.training.rollout_every) == 0:
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
@@ -233,12 +234,12 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
                                 loss = self.model.compute_loss(batch)
-                                val_losses.append(loss)
+                                val_losses.append(loss.item())
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
                                     break
                         if len(val_losses) > 0:
-                            val_loss = torch.mean(torch.tensor(val_losses)).item()
+                            val_loss = float(np.mean(val_losses))
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
 
@@ -247,11 +248,12 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
-                        obs_dict = batch['obs']
-                        gt_action = batch['action']
+                        obs_dict = {k: v[:, :self.model.n_obs_steps] for k, v in batch['obs'].items()}
                         
                         result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
+                        start = self.model.n_obs_steps - 1
+                        gt_action = batch['action'][:, start:start + self.model.n_action_steps]
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
                         del batch
@@ -287,7 +289,7 @@ class TrainDDPMUnetImageWorkspaceAUV(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
-                wandb_run.log(step_log, step=self.global_step)
+                run_logger.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1

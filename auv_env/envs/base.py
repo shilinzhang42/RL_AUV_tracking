@@ -59,6 +59,13 @@ class TargetTrackingBase(gym.Env):
         """
         return self.world.step(action=action)
 
+    def set_freeze_steps(self, freeze_agent_steps=0, freeze_target_steps=0):
+        if hasattr(self.world, "set_freeze_steps"):
+            self.world.set_freeze_steps(
+                freeze_agent_steps=freeze_agent_steps,
+                freeze_target_steps=freeze_target_steps,
+            )
+
     def seed(self, seed):
         np.random.seed(seed)
 
@@ -127,8 +134,20 @@ class WorldBase:
         self.current_visualization_drawn = False
         self.current_tick_count = 0
         self._init_ocean_current()
+        # Freeze controls in RL-step granularity.
+        self.freeze_agent_steps = 0
+        self.freeze_target_steps = 0
+        self.rl_step_count = 0
+
+    def set_freeze_steps(self, freeze_agent_steps=0, freeze_target_steps=0):
+        self.freeze_agent_steps = max(0, int(freeze_agent_steps))
+        self.freeze_target_steps = max(0, int(freeze_target_steps))
+        self.rl_step_count = 0
 
     def step(self, action):
+        freeze_target_this_step = self.rl_step_count < self.freeze_target_steps
+        freeze_agent_this_step = self.rl_step_count < self.freeze_agent_steps
+
         if self.controller == 'LQR':
             # Generate target knot from RL action
             r = action[0] * self.action_range_scale[0]
@@ -181,7 +200,10 @@ class WorldBase:
         for tick_idx in range(int(self.ticks_per_rl_step)):
             for i in range(self.num_targets):
                 target = 'target'+str(i)
-                if self.has_discovered[i]:
+                if freeze_target_this_step:
+                    self.target_u = np.zeros(8)
+                    self.ocean.act(target, self.target_u)
+                elif self.has_discovered[i]:
                     self.target_u = self.targets[i].update(self.sensors[target], self.sensors['t'])
                     self.ocean.act(target, self.target_u)
                 else:
@@ -206,7 +228,10 @@ class WorldBase:
                     ])
             
             # Update agent
-            self.u = self.agent.update(self.action, self.fix_depth_scalar, self.sensors['auv0'])
+            if freeze_agent_this_step:
+                self.u = np.zeros(8)
+            else:
+                self.u = self.agent.update(self.action, self.fix_depth_scalar, self.sensors['auv0'])
 
             # Apply ocean currents to auv0 (for 2D, use fixed depth for z-coordinate)
             if self.current_field_func is not None:
@@ -249,6 +274,8 @@ class WorldBase:
                 if draw_at_tick > 0 and self.current_tick_count == draw_at_tick:
                     self._draw_current_field_visualization(current_time=sensors.get('t', 0.0))
                     self.current_visualization_drawn = True
+
+        self.rl_step_count += 1
 
         # The targets are observed by the agent (z_t+1) and the beliefs are updated.
         observed = self.observe_and_update_belief()
@@ -319,6 +346,7 @@ class WorldBase:
 
     def reset(self, seed=None, **kwargs):
         self.ocean.reset()
+        self.rl_step_count = 0
         # Reset ocean current visualization flags
         self.current_tick_count = 0
         self.current_visualization_drawn = False

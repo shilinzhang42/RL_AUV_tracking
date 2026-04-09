@@ -14,6 +14,13 @@ os.chdir(ROOT)
 import auv_env
 from config_loader import load_config
 
+
+def _zero_action_for_env(env):
+    shape = getattr(env.action_space, "shape", None)
+    if shape is None or shape == ():
+        return np.zeros((), dtype=np.float32)
+    return np.zeros(shape, dtype=np.float32)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env_config", type=str, required=True)
@@ -51,12 +58,61 @@ def main():
             request = {"cmd": "UNKNOWN"}
 
         cmd = request.get("cmd")
+        warmup_steps = int(request.get("warmup_steps", 0) or 0)
+        warmup_max_steps = int(request.get("warmup_max_steps", 0) or 0)
+        freeze_agent_steps_req = request.get("freeze_agent_steps", None)
+        freeze_target_steps_req = request.get("freeze_target_steps", None)
 
         response = {}
 
         if cmd == "RESET":
             print("[Server] Resetting environment...")
             obs, info = env.reset()
+
+            # 冻结步数默认与 warmup_steps 一致；也支持客户端显式传入覆盖
+            if freeze_agent_steps_req is None:
+                freeze_agent_steps = max(warmup_steps, 0)
+            else:
+                freeze_agent_steps = max(int(freeze_agent_steps_req), 0)
+            if freeze_target_steps_req is None:
+                freeze_target_steps = max(warmup_steps, 0)
+            else:
+                freeze_target_steps = max(int(freeze_target_steps_req), 0)
+
+            env_base = getattr(env, "unwrapped", env)
+            if hasattr(env_base, "set_freeze_steps"):
+                env_base.set_freeze_steps(
+                    freeze_agent_steps=freeze_agent_steps,
+                    freeze_target_steps=freeze_target_steps,
+                )
+                print(
+                    "[Server] Freeze control: "
+                    f"agent_steps={freeze_agent_steps}, target_steps={freeze_target_steps}"
+                )
+
+            if warmup_steps > 0 or warmup_max_steps > 0:
+                zero_action = _zero_action_for_env(env)
+                warmup_count = 0
+                target_steps = max(warmup_steps, 0)
+                max_steps = max(warmup_max_steps, target_steps)
+                print(
+                    "[Server] Warmup: "
+                    f"min_steps={target_steps}, max_steps={max_steps}"
+                )
+
+                while warmup_count < max_steps:
+                    need_more = warmup_count < target_steps
+
+                    if not need_more:
+                        break
+
+                    obs, reward, terminated, truncated, info = env.step(zero_action)
+                    warmup_count += 1
+
+                    if terminated or truncated:
+                        print("[Server] Episode ended during warmup.")
+                        break
+                print(f"[Server] Warmup done at step {warmup_count}")
             response["status"] = "ok"
             response["done"] = False
             response["reward"] = 0.0

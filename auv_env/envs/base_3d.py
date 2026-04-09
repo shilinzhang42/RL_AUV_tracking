@@ -87,8 +87,20 @@ class WorldBase3D:
         self.current_visualization_drawn = False
         self.current_tick_count = 0
         self._init_ocean_current()
+        # Freeze controls in RL-step granularity.
+        self.freeze_agent_steps = 0
+        self.freeze_target_steps = 0
+        self.rl_step_count = 0
+
+    def set_freeze_steps(self, freeze_agent_steps=0, freeze_target_steps=0):
+        self.freeze_agent_steps = max(0, int(freeze_agent_steps))
+        self.freeze_target_steps = max(0, int(freeze_target_steps))
+        self.rl_step_count = 0
 
     def step(self, action):
+        freeze_target_this_step = self.rl_step_count < self.freeze_target_steps
+        freeze_agent_this_step = self.rl_step_count < self.freeze_agent_steps
+
         if self.controller == 'LQR':
             # Generate 3D target knot from RL action (using NumPy arrays for performance)
             r = action[0] * self.action_range_scale[0]
@@ -149,7 +161,10 @@ class WorldBase3D:
             # target
             for i in range(self.num_targets):
                 target = 'target'+str(i)
-                if self.has_discovered[i]:
+                if freeze_target_this_step:
+                    self.target_u = np.zeros(8)
+                    self.ocean.act(target, self.target_u)
+                elif self.has_discovered[i]:
                     self.target_u = self.targets[i].update(self.sensors[target], self.sensors['t'])
                     self.ocean.act(target, self.target_u)
                 else:
@@ -175,7 +190,10 @@ class WorldBase3D:
                     ])
             
             # Update agent (3D control)
-            self.u = self.agent.update(self.action, depth=None, sensors=self.sensors['auv0'])
+            if freeze_agent_this_step:
+                self.u = np.zeros(8)
+            else:
+                self.u = self.agent.update(self.action, depth=None, sensors=self.sensors['auv0'])
 
             # Apply ocean currents to auv0
             if self.current_field_func is not None:
@@ -216,6 +234,8 @@ class WorldBase3D:
                 target = 'target'+str(i)
                 self.sensors[target].update(sensors[target])
             self.update_every_tick(sensors)
+
+        self.rl_step_count += 1
 
         # The targets are observed by the agent (z_t+1) and the beliefs are updated.
         observed = self.observe_and_update_belief()
@@ -285,6 +305,7 @@ class WorldBase3D:
 
     def reset(self, seed=None, **kwargs):
         self.ocean.reset()
+        self.rl_step_count = 0
         self.current_tick_count = 0  # Reset tick counter
         self.current_visualization_drawn = False  # Reset visualization flag
         if self.config['draw_traj']:

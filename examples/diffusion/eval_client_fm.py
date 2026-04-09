@@ -21,7 +21,22 @@ from diffusion_policy.workspace.train_flow_matching_unet_image_workspace_custom 
     TrainFlowMatchingUnetImageWorkspace
 from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 
+
+def resolve_runtime_device(requested_device: str) -> str:
+    req = (requested_device or "auto").strip().lower()
+    if req == "auto":
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return "cuda"
+        return "cpu"
+    if req.startswith("cuda"):
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return requested_device
+        print("[Client] CUDA requested but unavailable. Fallback to CPU.")
+        return "cpu"
+    return requested_device
+
 def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
+    resolved_device = resolve_runtime_device(device)
     print(f"[Client] Loading checkpoint to RAM...")
     payload = torch.load(ckpt_path, map_location='cpu', weights_only=False)
     if 'pickles' not in payload:
@@ -49,8 +64,16 @@ def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
     if getattr(workspace, "ema_model", None) is not None:
         policy = workspace.ema_model
 
-    print(f"[Client] Moving policy to {device}...")
-    policy.to(device)
+    print(f"[Client] Moving policy to {resolved_device}...")
+    try:
+        policy.to(resolved_device)
+    except RuntimeError as e:
+        if resolved_device.startswith("cuda"):
+            print(f"[Client] Failed to init CUDA ({e}). Fallback to CPU.")
+            resolved_device = "cpu"
+            policy.to(resolved_device)
+        else:
+            raise
     policy.eval()
     # ------------------ 在这里插入检查代码 ------------------
     print("-" * 30)
@@ -107,7 +130,8 @@ def load_flow_matching_policy(ckpt_path: str, device: str = "cuda"):
     else:
         print("!!! 错误：模型参数量为 0，请检查模型类定义 !!!")
         print(f"[Client] Policy loaded successfully.")
-    return policy, cfg, normalizer
+    return policy, cfg, normalizer, resolved_device
+
 
 class RemoteEnv:
     def __init__(self, port=5555):
@@ -116,8 +140,12 @@ class RemoteEnv:
         self.socket.connect(f"tcp://localhost:{port}")
         print(f"[Client] Connected to HoloOcean Server on port {port}")
 
-    def reset(self):
-        self.socket.send_json({"cmd": "RESET"})
+    def reset(self, warmup_steps=0, warmup_max_steps=0):
+        self.socket.send_json({
+            "cmd": "RESET",
+            "warmup_steps": int(warmup_steps),
+            "warmup_max_steps": int(warmup_max_steps),
+        })
         resp = self.socket.recv_json()
         return self._parse_obs(resp["obs"])
 
@@ -143,8 +171,16 @@ class RemoteEnv:
             parsed["state"] = np.array(obs_dict["state"], dtype=np.float32)
         return parsed
 
-def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555, short_exec_steps=3):
-    policy, cfg, _normalizer = load_flow_matching_policy(ckpt_path, device)
+def run_eval(
+    ckpt_path,
+    num_episodes=5,
+    device="cuda",
+    port=5555,
+    short_exec_steps=3,
+    warmup_steps=5,
+    warmup_max_steps=5,
+):
+    policy, cfg, _normalizer, runtime_device = load_flow_matching_policy(ckpt_path, device)
     n_obs_steps = cfg.n_obs_steps
     env = RemoteEnv(port=port)
     obs_deque = collections.deque(maxlen=n_obs_steps)
@@ -153,7 +189,11 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555, short_exec_ste
     os.makedirs(save_path, exist_ok=True)
 
     for ep in tqdm(range(num_episodes), desc="Remote FM Eval"):
-        obs = env.reset()
+        obs = env.reset(
+            warmup_steps=warmup_steps,
+            warmup_max_steps=warmup_max_steps,
+        )
+        obs_deque.clear()
         for _ in range(n_obs_steps):
             obs_deque.append(obs)
 
@@ -174,13 +214,13 @@ def run_eval(ckpt_path, num_episodes=5, device="cuda", port=5555, short_exec_ste
                     # t = t * 2.0 - 1.0      # 再到 [-1, 1] (这一步之前漏掉了！)
                 t = TF.resize(t, [64, 64])
                 imgs.append(t)
-            img_batch = torch.stack(imgs).unsqueeze(0).to(device)
+            img_batch = torch.stack(imgs).unsqueeze(0).to(runtime_device)
             if img_batch.shape[2] != 3 and img_batch.shape[-1] == 3:
                 img_batch = img_batch.permute(0, 1, 4, 2, 3)
             obs_dict["camera_image"] = img_batch
 
             states = [torch.from_numpy(o["state"]).float() for o in obs_deque]
-            obs_dict["state"] = torch.stack(states).unsqueeze(0).to(device)
+            obs_dict["state"] = torch.stack(states).unsqueeze(0).to(runtime_device)
 
             with torch.no_grad():
                 # 在 policy.predict_action 之前执行
@@ -216,12 +256,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=str, required=True)
     parser.add_argument("--port", type=int, default=5555)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="推理设备: auto/cpu/cuda/cuda:0")
     parser.add_argument("--short_exec_steps", type=int, default=2,
                         help="每次推理后连续执行的动作步数")
+    parser.add_argument("--warmup_steps", type=int, default=15,
+                        help="reset 后先用零动作空转的步数")
+    parser.add_argument("--warmup_max_steps", type=int, default=15,
+                        help="预热允许的最大空转步数")
     args = parser.parse_args()
     run_eval(args.ckpt, port=args.port, device=args.device,
-             short_exec_steps=max(1, args.short_exec_steps))
+             short_exec_steps=max(1, args.short_exec_steps),
+             warmup_steps=max(0, args.warmup_steps),
+             warmup_max_steps=max(0, args.warmup_max_steps))
 
 if __name__ == "__main__":
     main()

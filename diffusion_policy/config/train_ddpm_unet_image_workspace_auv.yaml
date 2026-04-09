@@ -111,16 +111,25 @@ training:
   max_val_steps: null
 
 logging:
-  project: auv-diffusion-ddpm
-  entity: null
-  tags: ["auv", "ddpm", "diffusion", "image-policy"]
-  notes: "DDPM-based diffusion policy for AUV trajectory generation"
+  repo: swanlab
+  project: auv_tracking_flow_matching
+  resume: True
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "ddpm"]
 
 checkpoint:
   topk:
     monitor_key: train_loss
-    save_top_k: 5
     mode: min
-    filename: '{epoch:04d}-{train_loss:.3f}.ckpt'
+    k: 5
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}

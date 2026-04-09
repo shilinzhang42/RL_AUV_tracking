@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 配置路径
-CKPT="/home/zsl/RL_AUV_tracking/data/outputs/06.28.52_train_flow_matching_unet_image_track_image/checkpoints/epoch=0011-val_loss=0.2445.ckpt"
+CKPT="data/outputs/2026-04-08/11-52-14/checkpoints/epoch=0010-train_loss=0.087.ckpt"
 ENV_CONFIG="configs/envs/v1_config.yml"
 PORT=5555
 
@@ -17,4 +17,4 @@ sleep 5
 # 假设你的 FM 环境叫 'flow_matching'
 echo "Starting Flow Matching Client..."
 source ~/miniconda3/bin/activate flow_matching
-python examples/diffusion/eval_client_fm.py --ckpt "$CKPT" --port $PORT
+python examples/diffusion/eval_client_fm.py --ckpt "$CKPT" --port $PORT --device auto

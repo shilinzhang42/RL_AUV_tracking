@@ -6,12 +6,14 @@ from diffusion_policy.model.vision.multi_image_obs_encoder import MultiImageObsE
 class AUVHybridObsEncoder(nn.Module):
     def __init__(self, shape_meta, **kwargs):
         super().__init__()
-        
+
         # 1. 提取配置
         internal_meta = copy.deepcopy(shape_meta)
         self.rgb_keys = []
         self.low_dim_keys = []
-        self.n_obs_steps = kwargs.get('n_obs_steps', 2)
+        # 可选固定步数；若未提供则按输入张量时间维动态推断
+        encoder_kwargs = copy.deepcopy(kwargs)
+        self.n_obs_steps = encoder_kwargs.pop('n_obs_steps', None)
         
         # 过滤 shape_meta 供内部 vision_encoder 使用
         for k, v in shape_meta['obs'].items():
@@ -23,39 +25,51 @@ class AUVHybridObsEncoder(nn.Module):
                     del internal_meta['obs'][k]
 
         # 2. 实例化视觉编码器
-        self.vision_encoder = MultiImageObsEncoder(shape_meta=internal_meta, **kwargs)
-        
+        self.vision_encoder = MultiImageObsEncoder(shape_meta=internal_meta, **encoder_kwargs)
+
         # 3. 【核心优化 1】视觉投影器 (Vision Projector)
-        # 自动获取视觉编码器的原始输出维度 (如 12288)
-        raw_vision_dim = self.vision_encoder.output_shape()[0] * 6
+        # 使用 LazyLinear 自动对齐时间维展开后的输入维度
         self.vision_cond_dim = 512  # 强制压缩到 512
-        
+
         self.vision_projector = nn.Sequential(
-            nn.Linear(raw_vision_dim, self.vision_cond_dim),
+            nn.LazyLinear(self.vision_cond_dim),
             nn.LayerNorm(self.vision_cond_dim),
             nn.ReLU()
         )
-        
+
         # 4. 【核心优化 2】状态投影器 (State Projector)
-        total_low_dim_input = 0
-        for k in self.low_dim_keys:
-            dim = shape_meta['obs'][k]['shape'][0]
-            total_low_dim_input += dim * self.n_obs_steps
-            
+        # 将全部 low-dim 键拼接后统一投影，避免多键时输出维度膨胀
         self.state_cond_dim = 256  # 投影到 256
         self.state_projector = nn.Sequential(
-            nn.Linear(total_low_dim_input, self.state_cond_dim),
+            nn.LazyLinear(self.state_cond_dim),
             nn.LayerNorm(self.state_cond_dim),
             nn.ReLU(),
             nn.Linear(self.state_cond_dim, self.state_cond_dim),
             nn.ReLU()
         )
-        
+
         self.full_shape_meta = shape_meta
+
+    def _resolve_obs_steps(self, obs_dict):
+        if self.n_obs_steps is not None:
+            return int(self.n_obs_steps)
+
+        for key in self.rgb_keys:
+            x = obs_dict.get(key, None)
+            if x is not None and x.ndim >= 5:
+                return int(x.shape[1])
+
+        for key in self.low_dim_keys:
+            x = obs_dict.get(key, None)
+            if x is not None and x.ndim >= 3:
+                return int(x.shape[1])
+
+        return 1
 
     def forward(self, obs_dict):
         batch_size = None
-        
+        effective_obs_steps = self._resolve_obs_steps(obs_dict)
+
         # --- 视觉路径 ---
         vision_obs_dict = {k: obs_dict[k] for k in self.rgb_keys}
         raw_vision_feat = self.vision_encoder(vision_obs_dict)
@@ -66,16 +80,23 @@ class AUVHybridObsEncoder(nn.Module):
         # --- 状态路径 ---
         low_dim_features = []
         for key in self.low_dim_keys:
-            data = obs_dict[key][:, :self.n_obs_steps, :] # 确保步数对齐
-            data_flat = data.reshape(batch_size, -1)
-            # 投影到 256 维
-            projected_state = self.state_projector(data_flat)
-            low_dim_features.append(projected_state)
+            data = obs_dict[key]
+            if data.ndim == 3:
+                data = data[:, :effective_obs_steps, :]
+                data_flat = data.reshape(batch_size, -1)
+            else:
+                data_flat = data.reshape(batch_size, -1)
+            low_dim_features.append(data_flat)
 
-        # --- 最终拼接：512 + 256 = 768 ---
-        return torch.cat([vision_feat] + low_dim_features, dim=-1)
+        if len(low_dim_features) > 0:
+            low_dim_concat = torch.cat(low_dim_features, dim=-1)
+            state_feat = self.state_projector(low_dim_concat)
+            return torch.cat([vision_feat, state_feat], dim=-1)
+
+        return vision_feat
 
     @torch.no_grad()
     def output_shape(self):
-        # 明确返回 768
-        return (int(self.vision_cond_dim + self.state_cond_dim),)
+        if len(self.low_dim_keys) > 0:
+            return (int(self.vision_cond_dim + self.state_cond_dim),)
+        return (int(self.vision_cond_dim),)

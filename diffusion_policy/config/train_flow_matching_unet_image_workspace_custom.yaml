@@ -32,6 +32,7 @@ policy:
   obs_encoder:
     _target_: diffusion_policy.model.vision.AUVHybridObsEncoder.AUVHybridObsEncoder
     shape_meta: ${shape_meta}
+    n_obs_steps: ${n_obs_steps}
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18

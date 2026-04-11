@@ -10,6 +10,9 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "flow_matching_test"
 
+# 统一训练预算（用于 FM/DDPM 公平对比）
+train_budget_steps: 100000
+
 horizon: 32
 n_obs_steps: 6
 n_action_steps: 8
@@ -90,7 +93,7 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False 
-  resume: True
+  resume: False
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_epochs: 15
@@ -101,14 +104,14 @@ training:
   checkpoint_every: 1
   val_every: 1
   sample_every: 5
-  max_train_steps: null
+  max_train_steps: ${train_budget_steps}
   max_val_steps: null
   tqdm_interval_sec: 1.0
 
 logging:
   repo: swanlab
   project: auv_tracking_flow_matching
-  resume: True
+  resume: False
   # 如果没有网络，建议改为 offline
   mode: online  
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

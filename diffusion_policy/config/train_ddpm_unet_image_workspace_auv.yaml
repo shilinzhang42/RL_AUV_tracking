@@ -10,6 +10,9 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "ddpm_auv_test"
 
+# 统一训练预算（用于 FM/DDPM 公平对比）
+train_budget_steps: 100000
+
 horizon: 32
 n_obs_steps: 6
 n_action_steps: 8
@@ -96,7 +99,7 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False 
-  resume: True
+  resume: False
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_epochs: 15
@@ -108,23 +111,23 @@ training:
   val_every: 1
   sample_every: 5
   tqdm_interval_sec: 1.0
-  max_train_steps: null
+  max_train_steps: ${train_budget_steps}
   max_val_steps: null
 
 logging:
   repo: swanlab
-  project: auv_tracking_flow_matching
-  resume: True
+  project: auv_tracking_ddpm
+  resume: False
   mode: online
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
   tags: ["${name}", "${task_name}", "ddpm"]
 
 checkpoint:
   topk:
-    monitor_key: train_loss
+    monitor_key: val_loss
     mode: min
     k: 5
-    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.4f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 

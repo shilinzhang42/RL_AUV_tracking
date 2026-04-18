@@ -10,6 +10,9 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "flow_matching_test"
 
+# 统一训练预算（用于 FM/DDPM 公平对比）
+train_budget_steps: 100000
+
 horizon: 32
 n_obs_steps: 6
 n_action_steps: 8
@@ -30,9 +33,20 @@ policy:
     shift: 1.0 
 
   obs_encoder:
-    _target_: diffusion_policy.model.vision.AUVHybridObsEncoder.AUVHybridObsEncoder
+    _target_: diffusion_policy.model.vision.AUVHybridObsEncoderV2.AUVHybridObsEncoderV2
     shape_meta: ${shape_meta}
     n_obs_steps: ${n_obs_steps}
+    # --- 新增增强参数 ---
+    # 状态分支时序编码器: gru | tcn | none
+    state_temporal_encoder: gru
+    # 视觉分支是否启用逐帧编码 + TCN 时序聚合
+    vision_use_tcn: true
+    # 融合方式: film | cross_attn | cat
+    fusion_type: film
+    # 特征维度（与 V1 保持一致，输出仍为 768 维）
+    vision_cond_dim: 512
+    state_cond_dim: 256
+    # --- ResNet 视觉骨干配置（透传给 MultiImageObsEncoder）---
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
@@ -49,10 +63,8 @@ policy:
   n_obs_steps: ${n_obs_steps}
   num_inference_steps: 20 
   obs_as_global_cond: ${obs_as_global_cond}
-  diffusion_step_embed_dim: 128
-  
-  # === 关键修改：针对 8GB 显存大幅缩小模型规模 ===
-  # 原值 [512, 1024, 2048] 太大，改为 [256, 512, 1024]
+  diffusion_step_embed_dim: 256
+
   down_dims: [256, 512, 1024]
   kernel_size: 5
   n_groups: 8
@@ -90,7 +102,7 @@ training:
   device: "cuda:0"
   seed: 42
   debug: False 
-  resume: True
+  resume: False
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_epochs: 15
@@ -101,14 +113,14 @@ training:
   checkpoint_every: 1
   val_every: 1
   sample_every: 5
-  max_train_steps: null
+  max_train_steps: ${train_budget_steps}
   max_val_steps: null
   tqdm_interval_sec: 1.0
 
 logging:
   repo: swanlab
   project: auv_tracking_flow_matching
-  resume: True
+  resume: False
   # 如果没有网络，建议改为 offline
   mode: online  
   name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}

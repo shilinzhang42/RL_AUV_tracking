@@ -11,9 +11,11 @@ class AUVHybridObsEncoder(nn.Module):
         internal_meta = copy.deepcopy(shape_meta)
         self.rgb_keys = []
         self.low_dim_keys = []
-        # 可选固定步数；若未提供则按输入张量时间维动态推断
+        # 与 policy/dataset 显式对齐观测窗口长度
         encoder_kwargs = copy.deepcopy(kwargs)
         self.n_obs_steps = encoder_kwargs.pop('n_obs_steps', None)
+        if self.n_obs_steps is not None:
+            self.n_obs_steps = int(self.n_obs_steps)
         
         # 过滤 shape_meta 供内部 vision_encoder 使用
         for k, v in shape_meta['obs'].items():
@@ -51,9 +53,11 @@ class AUVHybridObsEncoder(nn.Module):
         self.full_shape_meta = shape_meta
 
     def _resolve_obs_steps(self, obs_dict):
+        # 推荐由 config 显式传入，保证与 policy 的 n_obs_steps 对齐
         if self.n_obs_steps is not None:
             return int(self.n_obs_steps)
 
+        # 兼容兜底：若未配置则按输入推断，避免硬编码
         for key in self.rgb_keys:
             x = obs_dict.get(key, None)
             if x is not None and x.ndim >= 5:

@@ -36,6 +36,12 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
         self.obs_encoder = obs_encoder
         self.normalizer = LinearNormalizer()
 
+        # 记录 rgb 键名，用于训练/推理时的图像类型转换
+        self.rgb_keys = [
+            k for k, v in shape_meta['obs'].items()
+            if v.get('type') == 'rgb'
+        ]
+
         action_dim = shape_meta['action']['shape'][0]
         self.action_dim = action_dim
         global_cond_dim = None
@@ -79,8 +85,8 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
             # 维度从 (B, horizon, C, H, W) 变为 (B, n_obs_steps, C, H, W)
             sliced_obs = value[:, :self.n_obs_steps]
             
-            # 【关键修改】：仅在 GPU 上将图像从 uint8 转换为 float32
-            if 'image' in key and sliced_obs.dtype == torch.uint8:
+            # 用 shape_meta 中的 rgb 键名判断，避免依赖键名字符串
+            if key in self.rgb_keys and sliced_obs.dtype == torch.uint8:
                 compact_obs[key] = sliced_obs.float() / 255.0
             else:
                 compact_obs[key] = sliced_obs
@@ -123,7 +129,7 @@ class FlowMatchingUnetImagePolicy(BaseImagePolicy):
         # 2. 同样的延迟类型转换策略
         processed_obs = dict()
         for key, value in obs_dict.items():
-            if 'image' in key and value.dtype == torch.uint8:
+            if key in self.rgb_keys and value.dtype == torch.uint8:
                 processed_obs[key] = value.float() / 255.0
             else:
                 processed_obs[key] = value

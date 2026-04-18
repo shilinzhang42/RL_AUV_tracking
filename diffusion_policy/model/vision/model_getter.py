@@ -13,7 +13,7 @@ def get_resnet(name, weights=None, **kwargs):
     func = getattr(torchvision.models, name)
     resnet = func(weights=weights, **kwargs)
 
-    resnet.avgpool = torch.nn.AdaptiveAvgPool2d((2, 2)) 
+    resnet.avgpool = torch.nn.AdaptiveAvgPool2d((1, 1))
 
     resnet.fc = torch.nn.Identity()
     return resnet
